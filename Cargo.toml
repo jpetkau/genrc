@@ -1,0 +1,9 @@
+[package]
+name = "ash"
+version = "0.1.0"
+edition = "2021"
+description = "refcounted pointer type that "
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jpetkau/ash"
+categories = ["algorithms", "rust-patterns"]
+keywords = ["arc", "rc", "shared_ptr"]
