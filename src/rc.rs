@@ -1,21 +1,21 @@
-//! Sh<T> is very similar to `std::rc::Rc<T>`, but with some capabilities like
-//! C++'s `shared_ptr`.
+//! ash::Rc<T> is very similar to `std::rc::Rc<T>`, but with some capabilities
+//! like C++'s `shared_ptr`.
 //!
-//! If you have an `Sh<T>`, and `T` contains some subobject of type `U`, then
-//! you can construct an `Sh<U>` that shares ownership with the original object,
-//! by calling `Sh::derived()`.
+//! If you have an `ash::Rc`, and `T` contains some subobject of type `U`, then
+//! you can construct an `Rc<U>` that shares ownership with the original object,
+//! by calling `Rc::project()`.
 //!
 //! E.g.
 //!
-//!     use ash::sh::{Sh, Weak};
-//!     let a: Sh<[i32; 3]> = Sh::new([1, 2, 3]);
-//!     let w: Weak<[i32; 3]> = Sh::downgrade(&a);
+//!     use ash::rc::{Rc, Weak};
+//!     let a: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
+//!     let w: Weak<[i32; 3]> = Rc::downgrade(&a);
 //!
 //!     // convert the sized array into a slice
-//!     let b: Sh<[i32]> = Sh::derived(a, |x| &x[..]);
+//!     let b: Rc<[i32]> = Rc::project(a, |x| &x[..]);
 //!
 //!     // get a reference to one element of the array
-//!     let c: Sh<i32> = Sh::derived(b, |x| &x[1]);
+//!     let c: Rc<i32> = Rc::project(b, |x| &x[1]);
 //!
 //!     // `c` is keeping the whole object alive
 //!     assert!(w.upgrade().is_some());
@@ -24,20 +24,20 @@
 //!
 //! ## Differences from std::rc::Rc
 //!
-//! If you leak so many Sh objects that the refcount overflows, Rc will abort.
-//! Sh does not, because there is no `abort()` with `no_std`.
+//! If you leak so many Rc objects that the refcount overflows, Rc will abort.
+//! Rc does not, because there is no `abort()` with `no_std`.
 //!
-//! Implicit conversion from `Sh<T>` to `Sh<dyn Trait>` is not supported,
+//! Implicit conversion from `Rc<T>` to `Rc<dyn Trait>` is not supported,
 //! because that requires some unstable traits. However you can do the
-//! conversion explicitly with `Sh::derived`.
+//! conversion explicitly with `Rc::project`.
 //!
-//! `Sh::from_box` does not copy the object from the original box. Instead it
+//! `Rc::from_box` does not copy the object from the original box. Instead it
 //! takes ownership of the box as-is, with the counts in a separate allocation.
 //!
 //! ## See also
 //!
-//! `Ash<T>` in this crate is similar to `Sh<T>`, but for multithreaded use like
-//! `std::sync::Arc`.
+//! `ash::Arc<T>` in this crate is atomic version for sharing data across
+//! threads..
 use std::{
     cell::Cell,
     fmt,
@@ -47,7 +47,7 @@ use std::{
     ptr,
 };
 
-// Counts and destructors for objects owned by Sh. Unlike with Rc<T>, there is
+// Counts and destructors for objects owned by Rc. Unlike with Rc<T>, there is
 // not necessarily any relationship between the pointer type and the actual
 // stored type.
 struct ShHeader {
@@ -62,7 +62,7 @@ struct ShBox<T> {
     value: MaybeUninit<T>,
 }
 
-pub struct Sh<T: ?Sized> {
+pub struct Rc<T: ?Sized> {
     header: ptr::NonNull<ShHeader>,
     ptr: ptr::NonNull<T>,
     phantom: PhantomData<T>,
@@ -73,7 +73,7 @@ pub struct Weak<T: ?Sized> {
     ptr: ptr::NonNull<T>,
 }
 
-impl<T: ?Sized> Deref for Sh<T> {
+impl<T: ?Sized> Deref for Rc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -81,8 +81,8 @@ impl<T: ?Sized> Deref for Sh<T> {
     }
 }
 
-impl<T> Sh<T> {
-    pub fn new(value: T) -> Sh<T> {
+impl<T> Rc<T> {
+    pub fn new(value: T) -> Rc<T> {
         let b = Box::leak(Box::new(ShBox {
             header: ShHeader {
                 strong: Cell::new(1),
@@ -92,18 +92,18 @@ impl<T> Sh<T> {
             },
             value: MaybeUninit::new(value),
         }));
-        Sh {
+        Rc {
             header: (&b.header).into(),
             ptr: unsafe { b.value.assume_init_ref() }.into(),
             phantom: PhantomData,
         }
     }
 
-    /// Constructs a new `Sh<T>` while giving you a `Weak<T>` to the allocation,
+    /// Constructs a new `Rc<T>` while giving you a `Weak<T>` to the allocation,
     /// to allow you to construct a `T` which holds a weak pointer to itself.
     ///
     /// See `std::rc::Rc::new_cyclic` for more details.
-    pub fn new_cyclic<F>(data_fn: F) -> Sh<T>
+    pub fn new_cyclic<F>(data_fn: F) -> Rc<T>
     where
         F: FnOnce(&Weak<T>) -> T,
     {
@@ -131,7 +131,7 @@ impl<T> Sh<T> {
         let h = weak.header();
         debug_assert_eq!(h.strong.get(), 0, "No prior strong references should exist");
         h.strong.set(1);
-        let strong = Sh {
+        let strong = Rc {
             header: weak.header,
             ptr: weak.ptr,
             phantom: PhantomData,
@@ -144,18 +144,18 @@ impl<T> Sh<T> {
     }
 }
 
-impl<T: ?Sized> Sh<T> {
-    /// Return a `Sh<T>` for a boxed value. Unlike `Rc<T>`, this reuses the
+impl<T: ?Sized> Rc<T> {
+    /// Return a `Rc<T>` for a boxed value. Unlike `Rc<T>`, this reuses the
     /// original box allocation rather than copying it, and only allocates space
     /// for the header with the reference counts.
-    pub fn from_box(value: Box<T>) -> Sh<T> {
-        Sh::derived(Sh::new(value), |x| &**x)
+    pub fn from_box(value: Box<T>) -> Rc<T> {
+        Rc::project(Rc::new(value), |x| &**x)
     }
 
-    /// Return a `Sh<U>` for any type U contained within T, e.g. an element of a
+    /// Return a `Rc<U>` for any type U contained within T, e.g. an element of a
     /// slice, or &dyn view of an object.
-    pub fn derived<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(s: Self, f: F) -> Sh<U> {
-        let u = Sh {
+    pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(s: Self, f: F) -> Rc<U> {
+        let u = Rc {
             header: s.header,
             ptr: f(&*s).into(),
             phantom: PhantomData,
@@ -166,16 +166,19 @@ impl<T: ?Sized> Sh<T> {
         u
     }
 
-    /// Convert `Sh<T>` to `Sh<U>`, as long as &T converts to &U.
+    /// Convert `Rc<T>` to `Rc<U>`, as long as &T converts to &U.
     ///
     /// This should be spelled `from()`, but that conflicts with the blanket
     /// impl converting T->T.
     ///
     /// TODO: this doesn't work for slices; there's no blanket impl
     /// `for<'a> &'a [T]: From<&'a [T; N]>` and I don't know why.
-    /// So for now you must call `derived()` explicitly.
-    pub fn cast<U: ?Sized>(this: Sh<T>) -> Sh<U> where for<'a> &'a U: From<&'a T> {
-        Sh::derived(this, |x| From::from(x))
+    /// So for now you must call `project()` explicitly.
+    pub fn cast<U: ?Sized>(this: Rc<T>) -> Rc<U>
+    where
+        for<'a> &'a U: From<&'a T>,
+    {
+        Rc::project(this, |x| From::from(x))
     }
 
     /// Return a `sh::Weak` pointer to this object.
@@ -214,14 +217,14 @@ impl<T: ?Sized> Sh<T> {
 }
 
 impl<T: ?Sized> Weak<T> {
-    pub fn upgrade(&self) -> Option<Sh<T>> {
+    pub fn upgrade(&self) -> Option<Rc<T>> {
         let h = self.header();
         let s = h.strong.get();
         if s == 0 {
             None
         } else {
             h.strong.set(s + 1);
-            Some(Sh {
+            Some(Rc {
                 header: self.header,
                 ptr: self.ptr,
                 phantom: PhantomData,
@@ -253,11 +256,11 @@ impl<T: ?Sized> Weak<T> {
     }
 }
 
-impl<T: ?Sized> Clone for Sh<T> {
+impl<T: ?Sized> Clone for Rc<T> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.strong.set(h.strong.get() + 1);
-        Sh {
+        Rc {
             header: self.header,
             ptr: self.ptr,
             phantom: PhantomData,
@@ -276,7 +279,7 @@ impl<T: ?Sized> Clone for Weak<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Sh<T> {
+impl<T: ?Sized> Drop for Rc<T> {
     fn drop(&mut self) {
         let h = self.header();
         let s = h.strong.get() - 1;
@@ -299,7 +302,7 @@ impl<T: ?Sized> Drop for Sh<T> {
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for Sh<T> {
+impl<T: ?Sized + fmt::Debug> fmt::Debug for Rc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
@@ -335,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_simple() {
-        let x = Sh::new(2);
+        let x = Rc::new(2);
         let y = x.clone();
         assert_eq!(*x, 2);
         assert_eq!(&*x as *const i32, &*y as *const i32);
@@ -347,22 +350,22 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = Sh::new(DropCounter((1, 2), &mut n));
-            let y = Sh::derived(x.clone(), |x| &x.0 .0);
-            let z = Sh::derived(x.clone(), |x| &x.0 .1);
+            let x = Rc::new(DropCounter((1, 2), &mut n));
+            let y = Rc::project(x.clone(), |x| &x.0 .0);
+            let z = Rc::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
             assert_eq!(*z, 2);
-            assert_eq!(Sh::strong_count(&z), 3);
-            assert_eq!(Sh::weak_count(&z), 0);
+            assert_eq!(Rc::strong_count(&z), 3);
+            assert_eq!(Rc::weak_count(&z), 0);
             drop(x);
             drop(y);
-            assert_eq!(Sh::strong_count(&z), 1);
-            assert_eq!(Sh::weak_count(&z), 0);
+            assert_eq!(Rc::strong_count(&z), 1);
+            assert_eq!(Rc::weak_count(&z), 0);
             drop(z);
         }
         assert_eq!(n, 1);
 
-        // Updating the mut ref to `n` above looks sketchy. Confirm that Rc
+        // Updating the mut ref to `n` above looks sketchy. Confirm that rc::Rc
         // allows the same thing.
         {
             let x = std::rc::Rc::new(DropCounter((1, 2), &mut n));
@@ -379,16 +382,16 @@ mod tests {
 
     #[test]
     fn test_trait_obj() {
-        let x = Sh::new(2);
-        let d = Sh::derived(x.clone(), |p| p as &dyn std::fmt::Debug);
+        let x = Rc::new(2);
+        let d = Rc::project(x.clone(), |p| p as &dyn std::fmt::Debug);
         assert_eq!(format!("{:?}", d), "2");
     }
 
     #[test]
     fn test_array_to_slice() {
-        let x: Sh<[i32; 3]> = Sh::new([1, 2, 3]);
-        let y: Sh<[i32]> = Sh::derived(x.clone(), |p| &p[..]);
-        let z: Sh<i32> = Sh::derived(y.clone(), |p| &p[1]);
+        let x: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
+        let y: Rc<[i32]> = Rc::project(x.clone(), |p| &p[..]);
+        let z: Rc<i32> = Rc::project(y.clone(), |p| &p[1]);
         assert_eq!(format!("{:?}", y), "[1, 2, 3]");
         assert_eq!(format!("{:?}", z), "2");
     }
@@ -397,9 +400,9 @@ mod tests {
     fn test_vec_to_slice() {
         // Note unlike Arc/Rc, this uses the existing Box/Vec allocation rather
         // than copying, and allocates space for the header separately.
-        let x: Sh<Box<[i32]>> = Sh::new(vec![1, 2, 3].into());
-        let y: Sh<[i32]> = Sh::derived(x.clone(), |p| &p[..]);
-        let z: Sh<i32> = Sh::derived(y.clone(), |p| &p[1]);
+        let x: Rc<Box<[i32]>> = Rc::new(vec![1, 2, 3].into());
+        let y: Rc<[i32]> = Rc::project(x.clone(), |p| &p[..]);
+        let z: Rc<i32> = Rc::project(y.clone(), |p| &p[1]);
         assert_eq!(format!("{:?}", y), "[1, 2, 3]");
         assert_eq!(format!("{:?}", z), "2");
     }
@@ -407,29 +410,29 @@ mod tests {
     #[test]
     fn test_cyclic() {
         struct Cyclic(Weak<Cyclic>);
-        let x = Sh::new_cyclic(|p| Cyclic(p.clone()));
-        assert_eq!(Sh::strong_count(&x), 1);
-        assert_eq!(Sh::weak_count(&x), 1);
+        let x = Rc::new_cyclic(|p| Cyclic(p.clone()));
+        assert_eq!(Rc::strong_count(&x), 1);
+        assert_eq!(Rc::weak_count(&x), 1);
     }
 
     #[test]
     fn test_oopsie() {
-       let a: Sh<[i32; 3]> = Sh::new([1, 2, 3]);
-       let w: Weak<[i32; 3]> = Sh::downgrade(&a);
-       assert_eq!(w.strong_count(), 1);
+        let a: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
+        let w: Weak<[i32; 3]> = Rc::downgrade(&a);
+        assert_eq!(w.strong_count(), 1);
 
-       // convert the sized array into a slice
-       let b: Sh<[i32]> = Sh::derived(a, |x| &x[..]);
+        // convert the sized array into a slice
+        let b: Rc<[i32]> = Rc::project(a, |x| &x[..]);
 
-       // get a reference to one element of the array
-       let c: Sh<i32> = Sh::derived(b, |x| &x[1]);
-       assert_eq!(w.strong_count(), 1);
+        // get a reference to one element of the array
+        let c: Rc<i32> = Rc::project(b, |x| &x[1]);
+        assert_eq!(w.strong_count(), 1);
 
-       // `c` is keeping the whole object alive
-       assert!(w.upgrade().is_some());
-       assert_eq!(w.strong_count(), 1);
-       drop(c);
-       assert_eq!(w.strong_count(), 0);
-       assert!(w.upgrade().is_none());
+        // `c` is keeping the whole object alive
+        assert!(w.upgrade().is_some());
+        assert_eq!(w.strong_count(), 1);
+        drop(c);
+        assert_eq!(w.strong_count(), 0);
+        assert!(w.upgrade().is_none());
     }
 }
