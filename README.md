@@ -11,3 +11,11 @@ pointers to subobjects, like C++'s `shared_ptr`.
     // get a reference to one element of the array
     let c: Arc<i32> = Arc::derived(b, |x| &x[1]);
 ```
+
+Todo
+====
+
+Add something like `rc-box` as built-in functionality. The `rc-box` crate adds a
+nice API around std Arc/Rc: immediately after creating one, you know you have
+the unique pointer to it, so put that in a wrapper type that implements
+`DerefMut`. This is more convenient and more powerful than `new_cyclic`.

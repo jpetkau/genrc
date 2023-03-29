@@ -1,4 +1,4 @@
-//! ash::arc::Arc<T> is very similar to `std::sync::Arc<T>`, but with some
+//! `ash::arc::Arc<T>` is very similar to `std::sync::Arc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
 //! If you have an `Arc<T>`, and `T` contains some subobject of type `U`, then
@@ -43,7 +43,8 @@
 //!
 //! ## See also
 //!
-//! `ash::rc::Rc<T>` in this crate is the nonatomic version for single-threaded use.
+//! `ash::rc::Rc<T>` in this crate is the nonatomic version for single-threaded
+//! use.
 //!
 //! The `shared-rc` crate provides a nearly identical API. I would not have
 //! written this crate had I realied that `shared-rc` already existed. That
@@ -138,13 +139,13 @@ impl<T> Arc<T> {
     /// Constructs a new `Arc<T>` while giving you a `Weak<T>` to the allocation,
     /// to allow you to construct a `T` which holds a weak pointer to itself.
     ///
-    /// See `std::rc::Arc::new_cyclic` for more details.
+    /// See `std::sync::Arc::new_cyclic` for more details.
     pub fn new_cyclic<F>(data_fn: F) -> Arc<T>
     where
         F: FnOnce(&Weak<T>) -> T,
     {
         // Construct the inner in the "uninitialized" state with a single weak
-        // reference. We don't set strong=1 yet so taht if `f` panics, we don't
+        // reference. We don't set strong=1 yet so that if `f` panics, we don't
         // try to drop the uninitialized value.
         let b = Box::leak(Box::new(ArcBox {
             header: ArcHeader {
@@ -181,14 +182,14 @@ impl<T> Arc<T> {
 }
 
 impl<T: ?Sized> Arc<T> {
-    /// Return a `Arc<T>` for a boxed value. Unlike `Arc<T>`, this reuses the
-    /// original box allocation rather than copying it, and only allocates space
-    /// for the header with the reference counts.
+    /// Return an `Arc<T>` for a boxed value. Unlike `std::sync::Arc<T>`, this
+    /// reuses the original box allocation rather than copying it. It still has
+    /// to do a separate allocation for the (small) header object.
     pub fn from_box(value: Box<T>) -> Arc<T> {
         Arc::project(Arc::new(value), |x| &**x)
     }
 
-    /// Return a `Arc<U>` for any type U contained within T, e.g. an element of a
+    /// Return an `Arc<U>` for any type U contained within T, e.g. an element of a
     /// slice, or &dyn view of an object.
     pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(s: Self, f: F) -> Arc<U> {
         let u = Arc {

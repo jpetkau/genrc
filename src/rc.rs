@@ -1,5 +1,5 @@
-//! ash::Rc<T> is very similar to `std::rc::Rc<T>`, but with some capabilities
-//! like C++'s `shared_ptr`.
+//! `ash::rc::Rc<T>` is very similar to `std::rc::Rc<T>`, but with some
+//! capabilities like C++'s `shared_ptr`.
 //!
 //! If you have an `ash::Rc`, and `T` contains some subobject of type `U`, then
 //! you can construct an `Rc<U>` that shares ownership with the original object,
