@@ -58,7 +58,7 @@ using `new_cyclic()`:
         for d in 1..3 {
             let j = (i + d) % 5;
 
-            let link = Rc::downgrade(&graph[j]);
+            let link = RcBox::downgrade(&graph[j]);
             graph[i].edges.push(link);
         }
     }
@@ -97,13 +97,24 @@ entirely safely with `Option`:
 
 ```
     # use ash::rc::{Rc, RcBox, Weak};
+    // construct the object initially uninitialized
+    // we could use `Rc::get_mut` instead of `RcBox` here.
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
+
     // ... later ...
+    // initialize the object
     obj.replace(5);
-    let obj : Rc<i32> = Rc::project(obj, |x| x.as_ref().unwrap());
+    // project to the inner value that we just created
+    let obj : Rc<i32> = RcBox::project(obj, |x| x.as_ref().unwrap());
 
     assert_eq!(*obj, 5);
 ```
+
+Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
+implementation. `Rc<T>` is an alias `Ash<T, Cell<usize>>` and `Arc<T>` is an
+alias for `Ash<T, AtomicUsize>`. Unfortunately this messes up the documentation
+a little, since most users don't care about that.
+
 
 ## Differences from [`shared-rc`](https://lib.rs/crates/shared-rc)
 
@@ -123,33 +134,30 @@ differences:
 
 ## Differences from [`rc-box`](https://lib.rs/crates/rc-box)
 
-The idea for `RcBox` and `ArcBox` in this crate came from `rc-box`.
+The `rc-box` crate adds a nice API around std Arc/Rc: immediately after
+creating one, you know you have the unique pointer to it, so put that in
+a wrapper type that implements `DerefMut`. This crate copies that API.
 
-Since `rc-box` is built on top of the std types, it would be unsafe
-to allow weak pointers to its `RcBox` types, so it cannot replace
-`new_cyclic`.
+* Since `rc-box` is built on top of the std types, it would be unsafe
+  to allow weak pointers to its `RcBox` types, so it cannot replace
+  `new_cyclic`.
 
+* The implementation in `ash` is generic over whether the pointer is
+  unique or not (`RcBox<T>` is `Rc<T, true>`). This allows writing
+  code generic over the uniqueness of the pointer, which may be useful
+  for initialization (like the graph-creating example above, where the
+  graph is a `Vec<RcBox<Node>>` during initialization, then gets converted
+  to a `Vec<Rc<Node>>`.)
 
 ## Related Crates
 
 - [`shared-rc`](https://lib.rs/crates/shared-rc): Similar to this crate, but
-  uses the std versions of `Arc` and `Rc` under the hood.
+  wraps the std versions of `Arc` and `Rc` rather than reimplementing them.
 - [`rc-box`](https://lib.rs/crates/rc-box): Known unique versions of Rc and Arc.
 - [`erasable`](https://lib.rs/crates/erasable): Erase pointers of their concrete type.
 - [`ptr-union`](https://lib.rs/crates/ptr-union): Pointer unions the size of a pointer.
 - [`rc-borrow`](https://lib.rs/crates/rc-borrow): Borrowed forms of `Rc` and `Arc`.
 - [`slice-dst`](https://lib.rs/crates/slice-dst): Support for custom slice-based DSTs.
-
-The `shared-rc` crate provides a nearly identical API. I would not have
-written this crate had I realied that `shared-rc` already existed. That
-said, there are some differences:
-
-* `shared-rc` uses the std versions of `Arc` and `Rc` under the hood, so it
-  cannot (yet) support custom allocators.
-
-* `shared-rc` includes an `Owner` type param, with an explicit `erase_owner`
-  method to hide it. `ash::arc::Arc` always type-erases the owner.
-
 
 ## Todo
 
@@ -158,11 +166,6 @@ Better test coverage, including tsan
 Implement the various Unsize traits behind a feature. (They require nightly even
 though they've been unchanged since 1.0, and are required to fully implement
 smart ptrs.)
-
-Add something like `rc-box` as built-in functionality. The `rc-box` crate adds a
-nice API around std Arc/Rc: immediately after creating one, you know you have
-the unique pointer to it, so put that in a wrapper type that implements
-`DerefMut`. This is more convenient and more powerful than `new_cyclic`.
 
 Make behavior closer to std: abort on count overflow unless no_std
 */

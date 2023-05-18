@@ -50,8 +50,8 @@ unsafe impl ash::Count for Cell<usize> {
     fn acquire_fence(&self) {}
 }
 
-pub type Rc<T, const UNIQ: bool = false> = ash::Ash<T, Cell<usize>, UNIQ>;
-pub type RcBox<T> = Rc<T, true>;
+pub type Rc<T> = ash::Ash<T, Cell<usize>, false>;
+pub type RcBox<T> = ash::Ash<T, Cell<usize>, true>;
 pub type Weak<T> = ash::Weak<T, Cell<usize>>;
 
 #[cfg(test)]
@@ -207,7 +207,7 @@ mod tests {
         });
         for _ in 1..3 {
             let c = Rc::new(Tree {
-                parent: Some(Rc::downgrade(&root)),
+                parent: Some(RcBox::downgrade(&root)),
                 children: vec![],
             });
             root.children.push(c);

@@ -61,8 +61,8 @@ unsafe impl ash::Count for AtomicUsize {
     }
 }
 
-pub type Arc<T, const UNIQ: bool = false> = ash::Ash<T, AtomicUsize, UNIQ>;
-pub type ArcBox<T> = Arc<T, true>;
+pub type Arc<T> = ash::Ash<T, AtomicUsize, false>;
+pub type ArcBox<T> = ash::Ash<T, AtomicUsize, true>;
 pub type Weak<T> = ash::Weak<T, AtomicUsize>;
 
 #[cfg(test)]

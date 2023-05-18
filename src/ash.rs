@@ -42,6 +42,7 @@ struct AshAlloc<T, C> {
     value: MaybeUninit<T>,
 }
 
+/// This 
 pub struct Ash<T: ?Sized, C: Count, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
@@ -53,53 +54,16 @@ pub struct Weak<T: ?Sized, C: Count> {
     ptr: ptr::NonNull<T>,
 }
 
-/// A unique pointer can be lowered to a shared pointer.
-impl<T, C: Count> From<Ash<T, C, true>> for Ash<T, C, false> {
-    fn from(this: Ash<T, C, true>) -> Self {
-        // At this point, we may have weak pointers in other threads, so we need
-        // to synchronize with them possibly being upgraded to strong pointers.
-        // upgrade does an acquire on the strong count, so we need to increment
-        // it (from 0 -> 1) with a release.
-        this.header().strong.set_release(0, 1);
-        let header = this.header;
-        let ptr = this.ptr;
-        // Forget `this` so it doesn't adjust the refcount
-        mem::forget(this);
-        Ash {
-            header,
-            ptr,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<T, C: Count> Ash<T, C> {
+impl<T, C: Count, const UNIQ: bool> Ash<T, C, UNIQ> {
     pub fn new_unique(value: T) -> Ash<T, C, true> {
-        let b = Box::into_raw(Box::new(AshAlloc {
-            header: Header {
-                strong: C::new(0),
-                weak: C::new(1),
-                drop_header: drop_header::<T, C>,
-                drop_value: drop_value::<T, C>,
-            },
-            value: MaybeUninit::new(value),
-        }));
-        let h = b as *mut Header<C>;
-        let v = unsafe { ptr::addr_of!((*b).value) as *mut T };
-        Ash {
-            header: unsafe { ptr::NonNull::new_unchecked(h) },
-            ptr: unsafe { ptr::NonNull::new_unchecked(v) },
-            phantom: PhantomData,
-        }
+        Ash::<T, C, true>::new(value)
     }
 
     pub fn new(value: T) -> Self {
-        /*
-        Ash<T, C, true>::new(value).into()
-        */
+        let initial_strong_count = if UNIQ { 0 } else { 1 };
         let b = Box::into_raw(Box::new(AshAlloc {
             header: Header {
-                strong: C::new(1),
+                strong: C::new(initial_strong_count),
                 weak: C::new(1),
                 drop_header: drop_header::<T, C>,
                 drop_value: drop_value::<T, C>,
@@ -165,7 +129,7 @@ impl<T: ?Sized, C: Count> Ash<T, C> {
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
     pub fn from_box(value: Box<T>) -> Self {
-        Ash::project(Ash::new(value), |x| &**x)
+        Ash::project(Ash::<Box<T>, C>::new(value), |x| &**x)
     }
 
     /// Convert `Ash<T>` to `Ash<U>`, as long as &T converts to &U.
@@ -211,9 +175,13 @@ impl<T: ?Sized, C: Count> Ash<T, C, true> {
 }
 
 impl<T: ?Sized, C: Count, const UNIQ: bool> Ash<T, C, UNIQ> {
-    /// Return a `Ash<U>` for any type U contained within T, e.g. an element of a
-    /// slice, or &dyn view of an object.
-    pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(this: Self, f: F) -> Ash<U, C> {
+    /// Return a `Ash<U>` for any type U contained within T, e.g. an element of
+    /// a slice, or &dyn view of an object.
+    ///
+    /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
+    /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
+    /// uniqueness.
+    pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(this: Self, f: F) -> Ash<U, C, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
             this.header().strong.set_release(0, 1);
@@ -412,6 +380,26 @@ impl<T: ?Sized, C: Count, const UNIQ: bool> Drop for Ash<T, C, UNIQ> {
             let h = self.header.as_mut();
             let f = h.drop_header;
             f(self.header.as_ptr());
+        }
+    }
+}
+
+/// A unique pointer can be lowered to a shared pointer.
+impl<T, C: Count> From<Ash<T, C, true>> for Ash<T, C, false> {
+    fn from(this: Ash<T, C, true>) -> Self {
+        // At this point, we may have weak pointers in other threads, so we need
+        // to synchronize with them possibly being upgraded to strong pointers.
+        // upgrade does an acquire on the strong count, so we need to increment
+        // it (from 0 -> 1) with a release.
+        this.header().strong.set_release(0, 1);
+        let header = this.header;
+        let ptr = this.ptr;
+        // Forget `this` so it doesn't adjust the refcount
+        mem::forget(this);
+        Ash {
+            header,
+            ptr,
+            phantom: PhantomData,
         }
     }
 }

@@ -24,18 +24,58 @@ object, by calling `Rc::project()`.
     assert!(w.upgrade().is_none());
 ```
 
-Unlike `std`, references can point to const or static data without
-copying:
+Unlike `std`, references can point to static data without
+copying, again using `project()`:
 
 ```rust
     # use ash::rc::{Rc, Weak};
-
-    const bigbuf: [u8; 1024] = [1; 1024];
+    static BIGBUF: [u8; 1024] = [1; 1024];
 
     let p: Rc<()> = Rc::new(());
-    let p: Rc<[u8]> = Rc::project(p, |_| &bigbuf[..]);
+    let p: Rc<[u8]> = Rc::project(p, |_| &BIGBUF[..]);
+
+    assert!(std::ptr::eq(&BIGBUF[..], &*p));
 ```
 
+There are also types `RcBox<T>` (and `ArcBox<T>`) that are returned
+from `new_unique()`, which take advantage of the fact that the
+initially created pointer is still unique so can be used mutably.
+This allows you to create cyclic data structures without `Cell` or
+using `new_cyclic()`:
+
+```rust
+    use ash::rc::{Rc, RcBox, Weak};
+    struct Node {
+        edges: Vec<Weak<Node>>,
+    }
+
+    // Make a graph
+    let mut graph: Vec<RcBox<Node>> = (0..5).map(|_| {
+        Rc::new_unique(Node { edges: vec![] })
+    }).collect();
+
+    // Make some random edges in the graph
+    for i in 0..5 {
+        for d in 1..3 {
+            let j = (i + d) % 5;
+
+            let link = Rc::downgrade(&graph[j]);
+            graph[i].edges.push(link);
+        }
+    }
+
+    // we still have unique handles on the nodes, so attempting to upgrade
+    // weak pointers will fail.
+    let p = graph[1].edges[0].clone();
+    assert!(p.upgrade().is_none());
+
+    // convert `RcBox` to a normal `Rc` with `into()`.
+    let graph: Vec<Rc<Node>> = graph.into_iter().map(Into::into).collect();
+
+    // now the weak pointers are valid - we've made a graph with (weak)
+    // cycles, no unsafe or internal mutation required.
+    assert!(Rc::ptr_eq(&graph[0].edges[1].upgrade().unwrap(), &graph[2]));
+```
 
 ### Differences from `std::sync::Arc` and `std::rc::Rc`
 
@@ -56,15 +96,53 @@ objects after allocation. That API isn't possible in Ash, because the initial
 object is type-erased. However, `project` allows you to do the same thing
 entirely safely with `Option`:
 
-```skip
-    # use ash::rc::{Rc, Weak};
-    let obj : Rc<Option<i32>> = Rc::new(None);
-    Rc::get_mut(&mut obj).unwrap().replace(5);
+```rust
+    # use ash::rc::{Rc, RcBox, Weak};
+    let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
+    // ... later ...
+    obj.replace(5);
     let obj : Rc<i32> = Rc::project(obj, |x| x.as_ref().unwrap());
 
     assert_eq!(*obj, 5);
 ```
 
+Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
+implementation. `Rc<T>` is an alias `Ash<T, Cell<usize>>` and `Arc<T>` is an
+alias for `Ash<T, AtomicUsize>`.
+
+
+### Differences from [`shared-rc`](https://lib.rs/crates/shared-rc)
+
+`shared-rc` is a very similar crate to this one; I would not have written
+this if I'd known that shared-rc already existed. That said, there are some
+differences:
+
+* `shared-rc` uses the std versions of `Arc` and `Rc` under the hood, so it
+  cannot (yet) support zero-alloc usage. (But this crate doesn't suppor that
+  yet either, although it's possible.)
+
+* `shared-rc` includes an `Owner` type param, with an explicit `erase_owner`
+  method to hide it. `ash::arc::Arc` always type-erases the owner. This
+  adds one word of overhead in the pointer when a type-erased `shared-rc` is
+  pointing to an unsized type.
+  (e.g. `shared_rc::rc::[u8]` is 32 bytes, but `ash::rc::[u8]` is 24.)
+
+### Differences from [`rc-box`](https://lib.rs/crates/rc-box)
+
+The `rc-box` crate adds a nice API around std Arc/Rc: immediately after
+creating one, you know you have the unique pointer to it, so put that in
+a wrapper type that implements `DerefMut`. This crate copies that API.
+
+* Since `rc-box` is built on top of the std types, it would be unsafe
+  to allow weak pointers to its `RcBox` types, so it cannot replace
+  `new_cyclic`.
+
+* The implementation in `ash` is generic over whether the pointer is
+  unique or not (`RcBox<T>` is `Rc<T, true>`). This allows writing
+  code generic over the uniqueness of the pointer, which may be useful
+  for initialization (like the graph-creating example above, where the
+  graph is a `Vec<RcBox<Node>>` during initialization, then gets converted
+  to a `Vec<Rc<Node>>`.)
 
 ### Related Crates
 
@@ -94,11 +172,6 @@ Better test coverage, including tsan
 Implement the various Unsize traits behind a feature. (They require nightly even
 though they've been unchanged since 1.0, and are required to fully implement
 smart ptrs.)
-
-Add something like `rc-box` as built-in functionality. The `rc-box` crate adds a
-nice API around std Arc/Rc: immediately after creating one, you know you have
-the unique pointer to it, so put that in a wrapper type that implements
-`DerefMut`. This is more convenient and more powerful than `new_cyclic`.
 
 Make behavior closer to std: abort on count overflow unless no_std
 
