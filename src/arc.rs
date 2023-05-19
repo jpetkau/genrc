@@ -29,9 +29,8 @@ unsafe impl ash::Count for AtomicUsize {
         self.fetch_add(1, Relaxed)
     }
 
-    fn set_release(&self, old: usize, new: usize) {
-        assert_eq!(self.get(), old);
-        self.store(new, Release)
+    fn set_release(&self, value: usize) {
+        self.store(value, Release)
     }
 
     fn inc_if_nonzero(&self) -> bool {

@@ -36,9 +36,8 @@ unsafe impl ash::Count for Cell<usize> {
         }
     }
 
-    fn set_release(&self, old: usize, new: usize) {
-        assert_eq!(self.get(), old);
-        self.set(new);
+    fn set_release(&self, value: usize) {
+        self.set(value);
     }
 
     fn dec(&self) -> usize {

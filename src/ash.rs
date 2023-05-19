@@ -22,7 +22,7 @@ pub unsafe trait Count {
     fn new(v: usize) -> Self;
     fn get(&self) -> usize;
     fn inc_relaxed(&self) -> usize;
-    fn set_release(&self, old: usize, new: usize);
+    fn set_release(&self, value: usize);
     fn inc_if_nonzero(&self) -> bool;
     fn dec(&self) -> usize;
     fn acquire_fence(&self);
@@ -42,7 +42,7 @@ struct AshAlloc<T, C> {
     value: MaybeUninit<T>,
 }
 
-/// This 
+/// This
 pub struct Ash<T: ?Sized, C: Count, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
@@ -172,6 +172,25 @@ impl<T: ?Sized, C: Count> Ash<T, C, true> {
         mem::forget(s);
         u
     }
+
+    /// A unique pointer can be lowered to a shared pointer
+    pub fn shared(this: Ash<T, C, true>) -> Ash<T, C, false> {
+        // At this point, we may have weak pointers in other threads, so we need
+        // to synchronize with them possibly being upgraded to strong pointers.
+        // upgrade does an acquire on the strong count, so we need to increment
+        // it (from 0 -> 1) with a release.
+        debug_assert_eq!(this.header().strong.get(), 0);
+        this.header().strong.set_release(1);
+        let header = this.header;
+        let ptr = this.ptr;
+        // Forget `this` so it doesn't adjust the refcount
+        mem::forget(this);
+        Ash {
+            header,
+            ptr,
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<T: ?Sized, C: Count, const UNIQ: bool> Ash<T, C, UNIQ> {
@@ -181,10 +200,14 @@ impl<T: ?Sized, C: Count, const UNIQ: bool> Ash<T, C, UNIQ> {
     /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
     /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
     /// uniqueness.
-    pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(this: Self, f: F) -> Ash<U, C, false> {
+    pub fn project<U: ?Sized, F: for<'a> FnOnce(&'a T) -> &'a U>(
+        this: Self,
+        f: F,
+    ) -> Ash<U, C, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
-            this.header().strong.set_release(0, 1);
+            debug_assert_eq!(this.header().strong.get(), 0);
+            this.header().strong.set_release(1);
         }
         let u = Ash {
             header: this.header,
@@ -269,25 +292,6 @@ impl<T: ?Sized, C: Count, const UNIQ: bool> Ash<T, C, UNIQ> {
     }
 }
 
-impl<T: ?Sized, C: Count, const UNIQ: bool> Deref for Ash<T, C, UNIQ> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.ptr()
-    }
-}
-
-/// If we still have a unique reference, we can safely mutate the
-/// contents.
-impl<T: ?Sized, C: Count> DerefMut for Ash<T, C, true> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // Safety: ptr is always a valid reference, there's just no
-        // way to spell the lifetime in Rust. Since we're a unique
-        // RC, it's also safe to convert to mut ref.
-        unsafe { self.ptr.as_mut() }
-    }
-}
-
 impl<T: ?Sized, C: Count> Weak<T, C> {
     pub fn upgrade(self: &Self) -> Option<Ash<T, C>> {
         let h = self.header();
@@ -326,6 +330,18 @@ impl<T: ?Sized, C: Count> Weak<T, C> {
     }
 }
 
+impl<T: ?Sized, C: Count, const UNIQ: bool> AsRef<T> for Ash<T, C, UNIQ> {
+    fn as_ref(&self) -> &T {
+        &**self
+    }
+}
+
+impl<T: ?Sized, C: Count, const UNIQ: bool> borrow::Borrow<T> for Ash<T, C, UNIQ> {
+    fn borrow(&self) -> &T {
+        &**self
+    }
+}
+
 impl<T: ?Sized, C: Count> Clone for Ash<T, C> {
     fn clone(&self) -> Self {
         let h = self.header();
@@ -346,6 +362,31 @@ impl<T: ?Sized, C: Count> Clone for Weak<T, C> {
             header: self.header,
             ptr: self.ptr,
         }
+    }
+}
+
+impl<T: Default, C: Count, const UNIQ: bool> Default for Ash<T, C, UNIQ> {
+    fn default() -> Self {
+        Ash::new(T::default())
+    }
+}
+
+impl<T: ?Sized, C: Count, const UNIQ: bool> Deref for Ash<T, C, UNIQ> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.ptr()
+    }
+}
+
+/// If we still have a unique reference, we can safely mutate the
+/// contents.
+impl<T: ?Sized, C: Count> DerefMut for Ash<T, C, true> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Safety: ptr is always a valid reference, there's just no
+        // way to spell the lifetime in Rust. Since we're a unique
+        // RC, it's also safe to convert to mut ref.
+        unsafe { self.ptr.as_mut() }
     }
 }
 
@@ -384,35 +425,26 @@ impl<T: ?Sized, C: Count, const UNIQ: bool> Drop for Ash<T, C, UNIQ> {
     }
 }
 
-/// A unique pointer can be lowered to a shared pointer.
-impl<T, C: Count> From<Ash<T, C, true>> for Ash<T, C, false> {
-    fn from(this: Ash<T, C, true>) -> Self {
-        // At this point, we may have weak pointers in other threads, so we need
-        // to synchronize with them possibly being upgraded to strong pointers.
-        // upgrade does an acquire on the strong count, so we need to increment
-        // it (from 0 -> 1) with a release.
-        this.header().strong.set_release(0, 1);
-        let header = this.header;
-        let ptr = this.ptr;
-        // Forget `this` so it doesn't adjust the refcount
-        mem::forget(this);
-        Ash {
-            header,
-            ptr,
-            phantom: PhantomData,
+impl<T: ?Sized, C: Count> Drop for Weak<T, C> {
+    fn drop(&mut self) {
+        let h = self.header();
+        if h.weak.dec() != 1 {
+            return;
+        }
+        // If we free the header, ensure that it happens-after `drop_value` has
+        // completed in Arc::drop.
+        h.weak.acquire_fence();
+        unsafe {
+            let f = h.drop_header;
+            f(self.header.as_ptr());
         }
     }
 }
 
-impl<T: ?Sized, C: Count, const UNIQ: bool> borrow::Borrow<T> for Ash<T, C, UNIQ> {
-    fn borrow(&self) -> &T {
-        &**self
-    }
-}
-
-impl<T: ?Sized, C: Count, const UNIQ: bool> AsRef<T> for Ash<T, C, UNIQ> {
-    fn as_ref(&self) -> &T {
-        &**self
+/// A unique pointer can be lowered to a shared pointer.
+impl<T, C: Count> From<Ash<T, C, true>> for Ash<T, C, false> {
+    fn from(uniq: Ash<T, C, true>) -> Self {
+        Ash::<T, C, true>::shared(uniq)
     }
 }
 
@@ -463,22 +495,6 @@ impl<T: ?Sized + Ord, C: Count, const UNIQ: bool> cmp::Ord for Ash<T, C, UNIQ> {
 }
 
 impl<T: ?Sized + Eq, C: Count, const UNIQ: bool> Eq for Ash<T, C, UNIQ> {}
-
-impl<T: ?Sized, C: Count> Drop for Weak<T, C> {
-    fn drop(&mut self) {
-        let h = self.header();
-        if h.weak.dec() != 1 {
-            return;
-        }
-        // If we free the header, ensure that it happens-after `drop_value` has
-        // completed in Arc::drop.
-        h.weak.acquire_fence();
-        unsafe {
-            let f = h.drop_header;
-            f(self.header.as_ptr());
-        }
-    }
-}
 
 impl<T: ?Sized + fmt::Display, C: Count, const UNIQ: bool> fmt::Display for Ash<T, C, UNIQ> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
