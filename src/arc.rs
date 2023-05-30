@@ -1,13 +1,8 @@
-//! `ash::rc::Rc<T>` is very similar to `std::rc::Rc<T>`, but with some
+//! `ash::rc::Arc<T>` is very similar to `std::sync::Arc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
 //! See module docs for detailed API, as it's mostly the same as
-//! `ash::arc::Arc<T>`.
-//!
-//! ## See also
-//!
-//! `ash::arc::Arc<T>` in this crate is atomic version for sharing
-//! data across threads.
+//! `ash::rc::Rc<T>`.
 use crate::ash;
 
 use core::sync::atomic::{
@@ -60,9 +55,9 @@ unsafe impl ash::Count for AtomicUsize {
     }
 }
 
-pub type Arc<T> = ash::Ash<T, AtomicUsize, false>;
-pub type ArcBox<T> = ash::Ash<T, AtomicUsize, true>;
-pub type Weak<T> = ash::Weak<T, AtomicUsize>;
+pub type Arc<'a, T> = ash::Ash<'a, T, AtomicUsize, false>;
+pub type ArcBox<'a, T> = ash::Ash<'a, T, AtomicUsize, true>;
+pub type Weak<'a, T> = ash::Weak<'a, T, AtomicUsize>;
 
 #[cfg(test)]
 mod tests {
@@ -169,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_cyclic() {
-        struct Cyclic(Weak<Cyclic>);
+        struct Cyclic(Weak<'static, Cyclic>);
         let x = Arc::new_cyclic(|p| Cyclic(p.clone()));
         assert_eq!(Arc::strong_count(&x), 1);
         assert_eq!(Arc::weak_count(&x), 1);
@@ -194,5 +189,70 @@ mod tests {
         drop(c);
         assert_eq!(w.strong_count(), 0);
         assert!(w.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_ptr_eq() {
+        // pointer equality is based the address of the subobject.
+        // Unlike for `std::sync::Arc` this is not the same thing
+        // as sharing the same allocation.
+
+        // normal case
+        let a = Arc::new(1);
+        let b = Arc::new(1);
+        let c = a.clone();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &c));
+
+        // two pointers with the same allocation but different addresses
+        let a = Arc::new([1, 1]);
+        let b = Arc::project(a.clone(), |x| &x[0]);
+        let c = Arc::project(a.clone(), |x| &x[1]);
+        assert!(!Arc::ptr_eq(&b, &c));
+
+        // two objects with different allocations but the same address
+        let obj = 1;
+        let p1 = Arc::new(&obj);
+        let p1 = Arc::project(p1, |x| &**x);
+        let p2 = Arc::new(&obj);
+        let p2 = Arc::project(p2, |x| &**x);
+        assert!(Arc::ptr_eq(&p1, &p2));
+    }
+
+    #[test]
+    fn test_cmp() {
+        let a = Arc::new(1);
+        let b = Arc::new(2);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn test_new_unique() {
+        // Example of creating a tree with weak parent pointers, without having
+        // to use Cell or RefCell, in a simpler way than new_cyclic.
+        struct Tree {
+            parent: Option<Weak<'static, Tree>>,
+            children: Vec<Arc<'static, Tree>>,
+        }
+        let mut root = Arc::new_unique(Tree {
+            parent: None,
+            children: vec![],
+        });
+        for _ in 1..3 {
+            let c = Arc::new(Tree {
+                parent: Some(ArcBox::downgrade(&root)),
+                children: vec![],
+            });
+            root.children.push(c);
+        }
+
+        // we still have a unique handle on the parent, so attempting to upgrade
+        // weak pointers will fail.
+        let p = root.children[0].parent.clone();
+        assert!(p.clone().unwrap().upgrade().is_none());
+
+        let root: Arc<_> = root.into();
+        // now we have a normal Arc to the parent, so we can upgrade child pointers
+        assert!(Arc::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
     }
 }

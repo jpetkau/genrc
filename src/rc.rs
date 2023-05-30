@@ -3,11 +3,6 @@
 //!
 //! See module docs for detailed API, as it's mostly the same as
 //! `ash::arc::Arc<T>`.
-//!
-//! ## See also
-//!
-//! `ash::arc::Arc<T>` in this crate is atomic version for sharing
-//! data across threads.
 use crate::ash;
 use std::cell::Cell;
 
@@ -49,9 +44,9 @@ unsafe impl ash::Count for Cell<usize> {
     fn acquire_fence(&self) {}
 }
 
-pub type Rc<T> = ash::Ash<T, Cell<usize>, false>;
-pub type RcBox<T> = ash::Ash<T, Cell<usize>, true>;
-pub type Weak<T> = ash::Weak<T, Cell<usize>>;
+pub type Rc<'a, T> = ash::Ash<'a, T, Cell<usize>, false>;
+pub type RcBox<'a, T> = ash::Ash<'a, T, Cell<usize>, true>;
+pub type Weak<'a, T> = ash::Weak<'a, T, Cell<usize>>;
 
 #[cfg(test)]
 mod tests {
@@ -183,6 +178,58 @@ mod tests {
         drop(c);
         assert_eq!(w.strong_count(), 0);
         assert!(w.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_ptr_eq() {
+        // pointer equality is based the address of the subobject.
+        // Unlike for `std::rc::Rc` this is not the same thing
+        // as sharing the same allocation.
+
+        // normal case
+        let a = Rc::new(1);
+        let b = Rc::new(1);
+        let c = a.clone();
+        assert!(!Rc::ptr_eq(&a, &b));
+        assert!(Rc::ptr_eq(&a, &c));
+
+        // two pointers with the same allocation but different addresses
+        let a = Rc::new([1, 1]);
+        let b = Rc::project(a.clone(), |x| &x[0]);
+        let c = Rc::project(a.clone(), |x| &x[1]);
+        assert!(!Rc::ptr_eq(&b, &c));
+
+        {
+            // two objects with different allocations but the same address
+            let obj = 1;
+            let p1 = Rc::new(&obj);
+            let p2 = Rc::projectr(&p1, |x| &**x);
+            let p3 = Rc::new(&obj);
+            let p4 = Rc::projectr(&p3, |x| &**x);
+            //assert!(Rc::ptr_eq(&p2, &p4));
+            p2
+        };
+
+        #[derive(Debug)]
+        struct P<T>(T);
+
+        fn proj<'a, T, U, F: FnOnce(&'a T) -> &'a U>(this: &P<T>, f: F) -> P<U> {
+            P(*f(&this.0))
+        }
+
+        let pbad = {
+            // two objects with different allocations but the same address
+            let obj = 1;
+            let p1 = P(&obj);
+            let p2 = proj(&p1, |x| &**x);
+            //let p1 = p1.clone();
+            //let p2 = Rc::project(p1, |x| &**x);
+            //let p3 = Rc::new(&obj);
+            //let p4 = Rc::project(p3, |x| &**x);
+            //assert!(Rc::ptr_eq(&p2, &p4));
+            p2
+        };
+        println!("ub: {:?}", pbad);
     }
 
     #[test]
