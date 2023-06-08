@@ -86,7 +86,7 @@ impl<'a, T, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     /// See `std::rc::Rc::new_cyclic` for more details.
     pub fn new_cyclic<F>(data_fn: F) -> Ash<'a, T, C>
     where
-        F: FnOnce(&Weak<T, C>) -> T,
+        F: FnOnce(&Weak<'a, T, C>) -> T,
     {
         // Construct the inner in the "uninitialized" state with a single weak
         // reference. We don't set strong=1 yet so that if `f` panics, we don't
@@ -142,10 +142,9 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
     /// TODO: this doesn't work for slices; there's no blanket impl
     /// `for<'a> &'a [T]: From<&'a [T; N]>` and I don't know why.
     /// So for now you must call `project()` explicitly.
-    pub fn cast<'b, U: ?Sized>(this: Ash<'a, T, C>) -> Ash<'b, U, C>
+    pub fn cast<U: ?Sized>(this: Ash<'a, T, C>) -> Ash<'a, U, C>
     where
-        &'b U: From<&'a T>,
-        'a: 'b
+        &'a U: From<&'a T>,
     {
         Ash::project(this, |x| From::from(x))
     }
@@ -161,11 +160,14 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
 impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
     /// Return a `Ash<U>` for any type U contained within T, e.g. an element of a
     /// slice, or &dyn view of an object.
-    pub fn project_mut<'b, U: ?Sized + 'b, F: FnOnce(&'a mut T) -> &'b mut U>(
+    pub fn project_mut<'b, U: ?Sized, F: FnOnce(&mut T) -> &mut U>(
         mut s: Self,
         f: F,
     ) -> Ash<'b, U, C, true>
-        where 'b: 'a
+    where
+        T: 'a,
+        U: 'b,
+        'a: 'b,
     {
         let u = Ash {
             header: s.header,
@@ -179,7 +181,7 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
     }
 
     /// A unique pointer can be lowered to a shared pointer
-    pub fn shared(this: Ash<T, C, true>) -> Ash<T, C, false> {
+    pub fn shared(this: Ash<'a, T, C, true>) -> Ash<'a, T, C, false> {
         // At this point, we may have weak pointers in other threads, so we need
         // to synchronize with them possibly being upgraded to strong pointers.
         // upgrade does an acquire on the strong count, so we need to increment
@@ -198,47 +200,27 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     /// Return a `Ash<U>` for any type U contained within T, e.g. an element of
     /// a slice, or &dyn view of an object.
     ///
     /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
     /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
     /// uniqueness.
-    pub fn project<'b, U: ?Sized + 'b, F: FnOnce(&'a T) -> &'b U>(
-        // here's the problem: we're moving Self into this function, so Self has
-        // a crazy short lifetime. So we _have_ to be able to return an object
-        // with a longer lifetime than Self.
-        //
-        // 'i is the actual lifetime of some i32 i.
-        // r = &'a i, so 'i: 'a
-        // rc: Rc<&'a i> + 'rc, so 'a: 'rc therefore 'i: 'rc
-        // in project:
-        //      T is &'a i32
-        //      U is i32 + 'a ?
-        this: Self,
-        f: F,
-    ) -> Ash<'b, U, C, false>
-        where 'b: 'a
-    {
-        todo!()
-        /*
+    pub fn project<U: ?Sized, F: FnOnce(&'a T) -> &'a U>(this: Self, f: F) -> Ash<'a, U, C, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
             debug_assert_eq!(this.header().strong.get(), 0);
             this.header().strong.set_release(1);
         }
-        let z = &*this;
-        let fz = f(z);
         let u = Ash {
             header: this.header,
-            ptr: f(&*this).into(),
+            ptr: f(this.ptr()).into(),
             phantom: PhantomData,
         };
         // Forget s so it doesn't adjust the refcount, since we moved it into u.
         mem::forget(this);
         u
-        */
     }
 
     /// Return a `sh::Weak` pointer to this object.
@@ -290,7 +272,7 @@ impl<'a, T: ?Sized, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
         UNIQ || (Ash::weak_count(this) == 0 && Ash::strong_count(this) == 1)
     }
 
-    fn ptr(&self) -> &T {
+    fn ptr(&self) -> &'a T {
         // Safety: ptr is always a valid reference, there's just no
         // way to spell the lifetime in Rust.
         unsafe { self.ptr.as_ref() }
@@ -384,7 +366,7 @@ impl<'a, T: ?Sized, C: Count> Clone for Weak<'a, T, C> {
         Weak {
             header: self.header,
             ptr: self.ptr,
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 }
@@ -467,13 +449,13 @@ impl<'a, T: ?Sized, C: Count> Drop for Weak<'a, T, C> {
 
 /// A unique pointer can be lowered to a shared pointer.
 impl<'a, T: 'a, C: Count> From<Ash<'a, T, C, true>> for Ash<'a, T, C, false> {
-    fn from(uniq: Ash<T, C, true>) -> Self {
+    fn from(uniq: Ash<'a, T, C, true>) -> Self {
         Ash::<'a, T, C, true>::shared(uniq)
     }
 }
 
-impl<'a, T: ?Sized + PartialEq + 'a, C: Count, const Q1: bool, const Q2: bool> PartialEq<Ash<'a, T, C, Q2>>
-    for Ash<'a, T, C, Q1>
+impl<'a, T: ?Sized + PartialEq + 'a, C: Count, const Q1: bool, const Q2: bool>
+    PartialEq<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
 {
     #[inline]
     fn eq(&self, other: &Ash<T, C, Q2>) -> bool {
@@ -488,8 +470,8 @@ impl<'a, T: ?Sized + PartialEq + 'a, C: Count, const Q1: bool, const Q2: bool> P
     }
 }
 
-impl<'a, T: ?Sized + PartialOrd + 'a, C: Count, const Q1: bool, const Q2: bool> PartialOrd<Ash<'a, T, C, Q2>>
-    for Ash<'a, T, C, Q1>
+impl<'a, T: ?Sized + PartialOrd + 'a, C: Count, const Q1: bool, const Q2: bool>
+    PartialOrd<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
 {
     fn partial_cmp(&self, other: &Ash<T, C, Q2>) -> Option<cmp::Ordering> {
         (**self).partial_cmp(&**other)
@@ -520,13 +502,17 @@ impl<'a, T: 'a + ?Sized + Ord, C: Count, const UNIQ: bool> cmp::Ord for Ash<'a, 
 
 impl<'a, T: 'a + ?Sized + Eq, C: Count, const UNIQ: bool> Eq for Ash<'a, T, C, UNIQ> {}
 
-impl<'a, T: 'a + ?Sized + fmt::Display, C: Count, const UNIQ: bool> fmt::Display for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized + fmt::Display, C: Count, const UNIQ: bool> fmt::Display
+    for Ash<'a, T, C, UNIQ>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }
 }
 
-impl<'a, T: 'a + ?Sized + fmt::Debug, C: Count, const UNIQ: bool> fmt::Debug for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized + fmt::Debug, C: Count, const UNIQ: bool> fmt::Debug
+    for Ash<'a, T, C, UNIQ>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }

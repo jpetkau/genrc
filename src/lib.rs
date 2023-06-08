@@ -39,12 +39,12 @@ cyclic data structures without needing `RefCell` or using `new_cyclic()`:
 
 ```
     use ash::rc::{Rc, RcBox, Weak};
-    struct Node {
-        edges: Vec<Weak<Node>>,
+    struct Node<'g> {
+        edges: Vec<Weak<'g, Node<'g>>>,
     }
 
     // Make a graph
-    let mut graph: Vec<RcBox<Node>> = (0..5).map(|_| {
+    let mut graph: Vec<_> = (0..5).map(|_| {
         Rc::new_unique(Node { edges: vec![] })
     }).collect();
 
@@ -70,6 +70,55 @@ cyclic data structures without needing `RefCell` or using `new_cyclic()`:
     // cycles, no unsafe or internal mutation required.
     assert!(Rc::ptr_eq(&graph[0].edges[1].upgrade().unwrap(), &graph[2]));
 ```
+
+
+## The extra lifetime parameter
+
+One difference that unfortunately makes this less of a trivial drop-in
+replacement is that `Rc` new has a lifetime parameter. This comes from
+the interaction of two features.
+
+First: `std::rc::Rc` allows you to create an `Rc` pointing to a local
+variable. E.g. this is legal:
+
+```
+    use std::{cell::Cell, rc::Rc};
+    let x = Cell::new(1);
+    let y = Rc::new(&x);
+    x.set(2);
+    assert_eq!(y.get(), 2);
+```
+
+The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
+referent, so the RC can't outlive the referent.
+
+But `project` lets you turn `Rc<&'a T>` into an `Rc<T>` pointing to the
+same object. The latter type has nowhere for the lifetime `'a` to go, so
+if allowed this would let the reference live too long and be a soundness
+hole.
+
+There are a few ways this could be addressed:
+1. `project` could only be allowed if the source type is outlives the
+  return type. That would disallow the `Rc<&'a T> -> Rc<T>` conversion.
+  For most use backwards-compatible cases, that's fine; `Rc<T>` almost
+  always has `T: static` anyway.
+
+  But `project` make the problem case *useful*: you can use `Rc` to
+  manage a group of objects whose overall lifetime is still restricted
+  to a stack or arena allocation. So this would be a significant loss.
+
+2. Add a new type, call it `RcGeneral`, that has the lifetime parameter,
+  and define `type Rc<T> = RcGeneral<'static, T>`. That makes the it a
+  drop-in for the usual case, but fails in cases where the type `T` is
+  not `'static`.
+
+3. Just add the type parameter to `Rc`. Usually it can be inferred, but
+  in type definitions it will need to be explicit. This is the approach
+  this crate takes, which unfortunately makes it less of a drop-in
+  replacement since you have to add `<'static>` here and there. If there
+  was a way to infer the lifetime parameter in type definitions, that
+  would be avoidable.
+
 
 ## Differences from `std::sync::Arc` and `std::rc::Rc`
 

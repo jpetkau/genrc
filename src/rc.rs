@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_cyclic() {
-        struct Cyclic(Weak<Cyclic>);
+        struct Cyclic(Weak<'static, Cyclic>);
         let x = Rc::new_cyclic(|p| Cyclic(p.clone()));
         assert_eq!(Rc::strong_count(&x), 1);
         assert_eq!(Rc::weak_count(&x), 1);
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn test_oopsie() {
         let a: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
-        let w: Weak<[i32; 3]> = Rc::downgrade(&a);
+        let w = Rc::downgrade(&a);
         assert_eq!(w.strong_count(), 1);
 
         // convert the sized array into a slice
@@ -202,34 +202,12 @@ mod tests {
         {
             // two objects with different allocations but the same address
             let obj = 1;
-            let p1 = Rc::new(&obj);
-            let p2 = Rc::projectr(&p1, |x| &**x);
+            let p1: Rc<&i32> = Rc::new(&obj);
+            let p2: Rc<i32> = Rc::project(p1, |x| &**x);
             let p3 = Rc::new(&obj);
-            let p4 = Rc::projectr(&p3, |x| &**x);
-            //assert!(Rc::ptr_eq(&p2, &p4));
-            p2
+            let p4 = Rc::project(p3, |x| &**x);
+            assert!(Rc::ptr_eq(&p2, &p4));
         };
-
-        #[derive(Debug)]
-        struct P<T>(T);
-
-        fn proj<'a, T, U, F: FnOnce(&'a T) -> &'a U>(this: &P<T>, f: F) -> P<U> {
-            P(*f(&this.0))
-        }
-
-        let pbad = {
-            // two objects with different allocations but the same address
-            let obj = 1;
-            let p1 = P(&obj);
-            let p2 = proj(&p1, |x| &**x);
-            //let p1 = p1.clone();
-            //let p2 = Rc::project(p1, |x| &**x);
-            //let p3 = Rc::new(&obj);
-            //let p4 = Rc::project(p3, |x| &**x);
-            //assert!(Rc::ptr_eq(&p2, &p4));
-            p2
-        };
-        println!("ub: {:?}", pbad);
     }
 
     #[test]
@@ -244,8 +222,8 @@ mod tests {
         // Example of creating a tree with weak parent pointers, without having
         // to use Cell or RefCell, in a simpler way than new_cyclic.
         struct Tree {
-            parent: Option<Weak<Tree>>,
-            children: Vec<Rc<Tree>>,
+            parent: Option<Weak<'static, Tree>>,
+            children: Vec<Rc<'static, Tree>>,
         }
         let mut root = Rc::new_unique(Tree {
             parent: None,
