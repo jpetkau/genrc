@@ -150,10 +150,18 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
     }
 
     /// Returns true if two `Ash` pointers point to the same object. Note that
-    /// this is is not the same as sharing the same reference counts--e.g. both
-    /// might point to the same static object due to project().
+    /// this is is not the same as sharing the same allocation: e.g. both might
+    /// point to the same static object due to project(), or both might point
+    /// to different subobjects of the same root pointer.
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.ptr == other.ptr
+    }
+
+    /// Returns true if two `Ash` pointers point to the same allocation, i.e.
+    /// they share reference counts. Note that they may point to different
+    /// subobjects within that allocation due to `project()`.
+    pub fn root_ptr_eq(this: &Self, other: &Self) -> bool {
+        this.header == other.header
     }
 }
 
@@ -180,7 +188,7 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
         u
     }
 
-    /// A unique pointer can be lowered to a shared pointer
+    /// A unique ("Box") pointer can be lowered to a normal shared pointer
     pub fn shared(this: Ash<'a, T, C, true>) -> Ash<'a, T, C, false> {
         // At this point, we may have weak pointers in other threads, so we need
         // to synchronize with them possibly being upgraded to strong pointers.
@@ -298,7 +306,7 @@ impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
 }
 
 impl<'a, T: ?Sized, C: Count> Weak<'a, T, C> {
-    pub fn upgrade(self: &Self) -> Option<Ash<T, C>> {
+    pub fn upgrade(self: &Self) -> Option<Ash<'a, T, C>> {
         let h = self.header();
         if h.strong.inc_if_nonzero() {
             Some(Ash {

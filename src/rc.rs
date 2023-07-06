@@ -44,19 +44,21 @@ unsafe impl ash::Count for Cell<usize> {
     fn acquire_fence(&self) {}
 }
 
-pub type Rc<'a, T> = ash::Ash<'a, T, Cell<usize>, false>;
+pub type RcL<'a, T> = ash::Ash<'a, T, Cell<usize>, false>;
+pub type WeakL<'a, T> = ash::Weak<'a, T, Cell<usize>>;
+pub type Rc<T> = RcL<'static, T>;
+pub type Weak<T> = WeakL<'static, T>;
 pub type RcBox<'a, T> = ash::Ash<'a, T, Cell<usize>, true>;
-pub type Weak<'a, T> = ash::Weak<'a, T, Cell<usize>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn counts<T>(x: &Rc<T>) -> (usize, usize) {
-        (Rc::strong_count(x), Rc::weak_count(x))
+    fn counts<T>(x: &RcL<T>) -> (usize, usize) {
+        (RcL::strong_count(x), RcL::weak_count(x))
     }
-    fn wcounts<T>(x: &Weak<T>) -> (usize, usize) {
-        (Weak::strong_count(x), Weak::weak_count(x))
+    fn wcounts<T>(x: &WeakL<T>) -> (usize, usize) {
+        (WeakL::strong_count(x), WeakL::weak_count(x))
     }
 
     struct DropCounter<'a, T>(T, &'a mut usize);
@@ -96,9 +98,9 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = Rc::new(DropCounter((1, 2), &mut n));
-            let y = Rc::project(x.clone(), |x| &x.0 .0);
-            let z = Rc::project(x.clone(), |x| &x.0 .1);
+            let x = RcL::new(DropCounter((1, 2), &mut n));
+            let y = RcL::project(x.clone(), |x| &x.0 .0);
+            let z = RcL::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
             assert_eq!(*z, 2);
             assert_eq!(counts(&z), (3, 0));
@@ -153,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_cyclic() {
-        struct Cyclic(Weak<'static, Cyclic>);
+        struct Cyclic(Weak<Cyclic>);
         let x = Rc::new_cyclic(|p| Cyclic(p.clone()));
         assert_eq!(Rc::strong_count(&x), 1);
         assert_eq!(Rc::weak_count(&x), 1);
@@ -202,11 +204,11 @@ mod tests {
         {
             // two objects with different allocations but the same address
             let obj = 1;
-            let p1: Rc<&i32> = Rc::new(&obj);
-            let p2: Rc<i32> = Rc::project(p1, |x| &**x);
-            let p3 = Rc::new(&obj);
-            let p4 = Rc::project(p3, |x| &**x);
-            assert!(Rc::ptr_eq(&p2, &p4));
+            let p1: RcL<&i32> = RcL::new(&obj);
+            let p2: RcL<i32> = RcL::project(p1, |x| &**x);
+            let p3 = RcL::new(&obj);
+            let p4 = RcL::project(p3, |x| &**x);
+            assert!(RcL::ptr_eq(&p2, &p4));
         };
     }
 
@@ -220,10 +222,12 @@ mod tests {
     #[test]
     fn test_new_unique() {
         // Example of creating a tree with weak parent pointers, without having
-        // to use Cell or RefCell, in a simpler way than new_cyclic.
+        // to use Cell or RefCell, in a simpler way than new_cyclic. Uses
+        // [`Rc::new_unique`] to get a unique Rc to the parent during
+        // construction.
         struct Tree {
-            parent: Option<Weak<'static, Tree>>,
-            children: Vec<Rc<'static, Tree>>,
+            parent: Option<Weak<Tree>>,
+            children: Vec<Rc<Tree>>,
         }
         let mut root = Rc::new_unique(Tree {
             parent: None,
@@ -242,8 +246,10 @@ mod tests {
         let p = root.children[0].parent.clone();
         assert!(p.clone().unwrap().upgrade().is_none());
 
-        let root: Rc<_> = root.into();
+        // Convert the root pointer to a normal Rc.
+        let root = RcBox::shared(root);
+
         // now we have a normal Rc to the parent, so we can upgrade child pointers
-        assert!(Rc::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
+        assert!(RcL::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
     }
 }

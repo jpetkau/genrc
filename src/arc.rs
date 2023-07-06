@@ -55,19 +55,21 @@ unsafe impl ash::Count for AtomicUsize {
     }
 }
 
-pub type Arc<'a, T> = ash::Ash<'a, T, AtomicUsize, false>;
+pub type ArcL<'a, T> = ash::Ash<'a, T, AtomicUsize, false>;
+pub type WeakL<'a, T> = ash::Weak<'a, T, AtomicUsize>;
+pub type Arc<T> = ArcL<'static, T>;
+pub type Weak<T> = WeakL<'static, T>;
 pub type ArcBox<'a, T> = ash::Ash<'a, T, AtomicUsize, true>;
-pub type Weak<'a, T> = ash::Weak<'a, T, AtomicUsize>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn counts<T>(x: &Arc<T>) -> (usize, usize) {
-        (Arc::strong_count(x), Arc::weak_count(x))
+    fn counts<T>(x: &ArcL<T>) -> (usize, usize) {
+        (ArcL::strong_count(x), ArcL::weak_count(x))
     }
-    fn wcounts<T>(x: &Weak<T>) -> (usize, usize) {
-        (Weak::strong_count(x), Weak::weak_count(x))
+    fn wcounts<T>(x: &WeakL<T>) -> (usize, usize) {
+        (WeakL::strong_count(x), WeakL::weak_count(x))
     }
 
     struct DropCounter<'a, T>(T, &'a mut usize);
@@ -107,9 +109,9 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = Arc::new(DropCounter((1, 2), &mut n));
-            let y = Arc::project(x.clone(), |x| &x.0 .0);
-            let z = Arc::project(x.clone(), |x| &x.0 .1);
+            let x = ArcL::new(DropCounter((1, 2), &mut n));
+            let y = ArcL::project(x.clone(), |x| &x.0 .0);
+            let z = ArcL::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
             assert_eq!(*z, 2);
             assert_eq!(counts(&z), (3, 0));
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_cyclic() {
-        struct Cyclic(Weak<'static, Cyclic>);
+        struct Cyclic(Weak<Cyclic>);
         let x = Arc::new_cyclic(|p| Cyclic(p.clone()));
         assert_eq!(Arc::strong_count(&x), 1);
         assert_eq!(Arc::weak_count(&x), 1);
@@ -209,14 +211,16 @@ mod tests {
         let b = Arc::project(a.clone(), |x| &x[0]);
         let c = Arc::project(a.clone(), |x| &x[1]);
         assert!(!Arc::ptr_eq(&b, &c));
+        assert!(ArcL::root_ptr_eq(&b, &c));
 
         // two objects with different allocations but the same address
         let obj = 1;
-        let p1 = Arc::new(&obj);
-        let p1 = Arc::project(p1, |x| &**x);
-        let p2 = Arc::new(&obj);
-        let p2 = Arc::project(p2, |x| &**x);
-        assert!(Arc::ptr_eq(&p1, &p2));
+        let p1 = ArcL::new(&obj);
+        let p1 = ArcL::project(p1, |x| &**x);
+        let p2 = ArcL::new(&obj);
+        let p2 = ArcL::project(p2, |x| &**x);
+        assert!(ArcL::ptr_eq(&p1, &p2));
+        assert!(!ArcL::root_ptr_eq(&p1, &p2));
     }
 
     #[test]
@@ -231,8 +235,8 @@ mod tests {
         // Example of creating a tree with weak parent pointers, without having
         // to use Cell or RefCell, in a simpler way than new_cyclic.
         struct Tree {
-            parent: Option<Weak<'static, Tree>>,
-            children: Vec<Arc<'static, Tree>>,
+            parent: Option<Weak<Tree>>,
+            children: Vec<Arc<Tree>>,
         }
         let mut root = Arc::new_unique(Tree {
             parent: None,
@@ -248,11 +252,13 @@ mod tests {
 
         // we still have a unique handle on the parent, so attempting to upgrade
         // weak pointers will fail.
-        let p = root.children[0].parent.clone();
-        assert!(p.clone().unwrap().upgrade().is_none());
+        let p: Weak<Tree> = root.children[0].parent.clone().unwrap();
+        assert!(p.clone().upgrade().is_none());
 
-        let root: Arc<_> = root.into();
+        // Convert the root pointer to a normal Arc.
+        let root: Arc<Tree> = ArcBox::shared(root);
+
         // now we have a normal Arc to the parent, so we can upgrade child pointers
-        assert!(Arc::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
+        assert!(Arc::ptr_eq(&p.upgrade().unwrap(), &root));
     }
 }
