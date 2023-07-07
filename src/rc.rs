@@ -1,15 +1,15 @@
-//! `ash::rc::Rc<T>` is very similar to `std::rc::Rc<T>`, but with some
+//! `genrc::rc::Rc<T>` is very similar to `std::rc::Rc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
 //! See module docs for detailed API, as it's mostly the same as
-//! `ash::arc::Arc<T>`.
-use crate::ash;
+//! `genrc::arc::Arc<T>`.
+use crate::genrc;
 use std::cell::Cell;
 
 #[repr(transparent)]
 pub struct Nonatomic(Cell<usize>);
 
-unsafe impl ash::Atomicity for Nonatomic {
+unsafe impl genrc::Atomicity for Nonatomic {
     fn new(v: usize) -> Self {
         Nonatomic(Cell::new(v))
     }
@@ -47,11 +47,11 @@ unsafe impl ash::Atomicity for Nonatomic {
     fn acquire_fence(&self) {}
 }
 
-pub type Rcl<'a, T> = ash::Ash<'a, T, Nonatomic, false>;
-pub type Weakl<'a, T> = ash::Weak<'a, T, Nonatomic>;
+pub type Rcl<'a, T> = genrc::Genrc<'a, T, Nonatomic, false>;
+pub type Weakl<'a, T> = genrc::Weak<'a, T, Nonatomic>;
 pub type Rc<T> = Rcl<'static, T>;
 pub type Weak<T> = Weakl<'static, T>;
-pub type RcBox<'a, T> = ash::Ash<'a, T, Nonatomic, true>;
+pub type RcBox<'a, T> = genrc::Genrc<'a, T, Nonatomic, true>;
 
 #[cfg(test)]
 mod tests {

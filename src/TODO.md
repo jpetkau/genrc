@@ -13,7 +13,7 @@ You can get it all the way to zero by providing this object yourself:
 
 ```skip
     todo!("implement from_static");
-    use ash::{rc::Rc,arc::Arc};
+    use genrc::{rc::Rc,arc::Arc};
     const BIGBUF: [u8; 1024] = [1; 1024];
 
     // This object can be used to create `Arc`s without any copying. But note

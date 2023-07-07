@@ -1,4 +1,4 @@
-# ash
+# genrc
 
 This crate provides alternatives to `Arc` and `Rc` which are (almost) drop-in
 replacements, but allow refcounted pointers to subobjects, like C++'s
@@ -10,7 +10,7 @@ The main feature, which adds a surprising amount of flexibility: if you have an
 `Rc::project()`.
 
 ```rust
-    use ash::rc::{Rc, Weak};
+    use genrc::rc::{Rc, Weak};
     let a: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
 
     // convert the sized array into a slice
@@ -24,7 +24,7 @@ Unlike `std`, references can point to static data without copying, again using
 `project()`:
 
 ```rust
-    # use ash::rc::Rc;
+    # use genrc::rc::Rc;
     static BIGBUF: [u8; 1024] = [1; 1024];
 
     let p: Rc<()> = Rc::new(());
@@ -40,7 +40,7 @@ cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::
 
 
 ```rust
-    use ash::rc::{Rc, RcBox, Weak};
+    use genrc::rc::{Rc, RcBox, Weak};
     struct Node {
         edges: Vec<Weak<Node>>,
     }
@@ -90,16 +90,16 @@ E.g. this is legal:
 The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
 referent, so the `Rc` can't outlive the referent.
 
-But `project()` lets you turn `ash::Rc<&'a T>` into an `Rc<T>` pointing to the
+But `project()` lets you turn `genrc::Rc<&'a T>` into an `Rc<T>` pointing to the
 same object. The latter type has nowhere for the lifetime `'a` to go, so
 if allowed this would let the reference live too long and be a soundness
 bug.
 
-To avoid this, the type [`ash::Rcl`] adds a lifetime parameter to `Rc`.
-In fact [`ash::Rc<T>`] is just a type alias for [`ash::Rcl<'static, T>`],
-and [`ash::Arc<T>`] is a type alias for [`ash::Arcl<'static, T>`].
+To avoid this, the type [`genrc::Rcl`] adds a lifetime parameter to `Rc`.
+In fact [`genrc::Rc<T>`] is just a type alias for [`genrc::Rcl<'static, T>`],
+and [`genrc::Arc<T>`] is a type alias for [`genrc::Arcl<'static, T>`].
 
-(And all of them are type aliases for [`ash::Ash`], which is generic over
+(And all of them are type aliases for [`genrc::Genrc`], which is generic over
 lifetime, referent type, uniqueness, and thread-safety. So you can write
 functions that are generic over `Arc` vs. `Rc` if desired.
 
@@ -114,7 +114,7 @@ but with a lifetime parameter. (`Rc<T>` is just a type alias for
 `Rcl<'static, T>`.)
 
 ```rust
-    use ash::rc::Rcl;
+    use genrc::rc::Rcl;
 
     // Imagine we have some JSON data that we loaded from a file
     // (or data allocated in an arena, etc)
@@ -155,7 +155,7 @@ There are a few ways this could be addressed:
 takes ownership of the box as-is, with the counts in a separate allocation.
 
 If you leak so many Rc objects that the refcount overflows, the std
-pointers will abort. `ash` does not, because there is no `abort()`
+pointers will abort. `genrc` does not, because there is no `abort()`
 function in `no_std`.
 
 Implicit conversion from `Rc<T>` to `Rc<dyn Trait>` is not supported,
@@ -164,12 +164,12 @@ conversion explicitly with `Rc::project`. [TODO: support this behind a
 nightly-requiring feature.]
 
 The std pointers have various `MaybeUninit`-related methods for initializing
-objects after allocation. That API isn't possible in Ash, because the initial
+objects after allocation. That API isn't possible in Genrc, because the initial
 object is type-erased. However, `project` allows you to do the same thing
 entirely safely with `Option`:
 
 ```rust
-    # use ash::rc::{Rc, RcBox, Weak};
+    # use genrc::rc::{Rc, RcBox, Weak};
     // construct the object initially uninitialized
     // we could use `Rc::get_mut` instead of `RcBox` here.
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
@@ -185,9 +185,9 @@ entirely safely with `Option`:
 ```
 
 Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
-implementation. `Rc<T>` is an alias `Ash<T, Nonatomic>` and `Arc<T>` is an
-alias for `Ash<T, Atomic>`. This does make the documentation a little
-uglier, since it's all on struct `Ash` instead of the actual types you normally
+implementation. `Rc<T>` is an alias `Genrc<T, Nonatomic>` and `Arc<T>` is an
+alias for `Genrc<T, Atomic>`. This does make the documentation a little
+uglier, since it's all on struct `Genrc` instead of the actual types you normally
 use.
 
 
@@ -201,12 +201,12 @@ differences:
   cannot support zero-alloc usage.
 
 * `shared-rc` includes an `Owner` type param, with an explicit `erase_owner`
-  method to hide it. `ash::arc::Arc` always type-erases the owner. This
+  method to hide it. `genrc::arc::Arc` always type-erases the owner. This
   saves one word of overhead in the pointer when a type-erased `shared-rc` is
   pointing to an unsized type.
-  (e.g. `shared_rc::rc::[u8]` is 32 bytes, but `ash::rc::[u8]` is 24.)
+  (e.g. `shared_rc::rc::[u8]` is 32 bytes, but `genrc::rc::[u8]` is 24.)
 
-* `ash` is generic over atomic vs. shared. `shared-rc` uses macros for that,
+* `genrc` is generic over atomic vs. shared. `shared-rc` uses macros for that,
   which makes the rustdocs harder to read but "go to definition" easier to
   read.
 
@@ -221,7 +221,7 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
   to allow weak pointers to its `RcBox` types, so it cannot replace
   `new_cyclic` as in the graph example above.
 
-* The implementation in `ash` is generic over whether the pointer is
+* The implementation in `genrc` is generic over whether the pointer is
   unique or not (`RcBox<T>` is `Rc<T, true>`). This allows writing
   code generic over the uniqueness of the pointer, which may be useful
   for initialization (like the graph-creating example above, where the

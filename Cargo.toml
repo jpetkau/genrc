@@ -1,9 +1,9 @@
 [package]
-name = "ash"
+name = "genrc"
 version = "0.1.0"
 edition = "2021"
 description = "refcounted pointer type that allows subobject pointers"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jpetkau/ash"
+repository = "https://github.com/jpetkau/genrc"
 categories = ["algorithms", "rust-patterns"]
 keywords = ["arc", "rc", "shared_ptr"]

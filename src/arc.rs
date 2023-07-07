@@ -1,9 +1,9 @@
-//! `ash::rc::Arc<T>` is very similar to `std::sync::Arc<T>`, but with some
+//! `genrc::rc::Arc<T>` is very similar to `std::sync::Arc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
 //! See module docs for detailed API, as it's mostly the same as
-//! `ash::rc::Rc<T>`.
-use crate::ash;
+//! `genrc::rc::Rc<T>`.
+use crate::genrc;
 
 use core::sync::atomic::{
     AtomicUsize,
@@ -13,7 +13,7 @@ use core::sync::atomic::{
 #[repr(transparent)]
 pub struct Atomic(AtomicUsize);
 
-unsafe impl ash::Atomicity for Atomic {
+unsafe impl genrc::Atomicity for Atomic {
     fn new(v: usize) -> Self {
         Atomic(AtomicUsize::new(v))
     }
@@ -59,11 +59,11 @@ unsafe impl ash::Atomicity for Atomic {
     }
 }
 
-pub type Arcl<'a, T> = ash::Ash<'a, T, Atomic, false>;
-pub type Weakl<'a, T> = ash::Weak<'a, T, Atomic>;
+pub type Arcl<'a, T> = genrc::Genrc<'a, T, Atomic, false>;
+pub type Weakl<'a, T> = genrc::Weak<'a, T, Atomic>;
 pub type Arc<T> = Arcl<'static, T>;
 pub type Weak<T> = Weakl<'static, T>;
-pub type ArcBox<'a, T> = ash::Ash<'a, T, Atomic, true>;
+pub type ArcBox<'a, T> = genrc::Genrc<'a, T, Atomic, true>;
 
 #[cfg(test)]
 mod tests {

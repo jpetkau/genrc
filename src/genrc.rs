@@ -1,14 +1,14 @@
-//! `ash::Ash<T, C>` implements `Arc` and `Rc` generically across the count type
+//! `genrc::Genrc<T, C>` implements `Arc` and `Rc` generically across the count type
 //! (atomic vs. nonatomic).
 //!
 //! See module docs for detailed API
 //!
 //! ## See also
 //!
-//! `ash::arc::Arc<T>` in this crate is atomic version for sharing data across
+//! `genrc::arc::Arc<T>` in this crate is atomic version for sharing data across
 //! threads.
 //!
-//! `ash::rc::Rc<T>` in this crate is nonatomic version for single-threaded use.
+//! `genrc::rc::Rc<T>` in this crate is nonatomic version for single-threaded use.
 use core::borrow;
 use std::{
     cmp, fmt,
@@ -28,7 +28,7 @@ pub unsafe trait Atomicity {
     fn acquire_fence(&self);
 }
 
-// Counts and destructors for objects owned by Ash.
+// Counts and destructors for objects owned by Genrc.
 struct Header<C> {
     strong: C,
     weak: C,
@@ -37,14 +37,14 @@ struct Header<C> {
 }
 
 #[repr(C)]
-struct AshAlloc<T, C> {
+struct Alloc<T, C> {
     header: Header<C>,
     value: MaybeUninit<T>,
 }
 
 /// Generic implementation behind `Rc`, `Rcl`, `RcBox`, `Arc`, `Arcl`,
 /// and `ArcBox`.
-pub struct Ash<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool = false> {
+pub struct Genrc<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
     phantom: PhantomData<&'a T>,
@@ -56,14 +56,14 @@ pub struct Weak<'a, T: ?Sized, C: Atomicity> {
     phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
-    pub fn new_unique(value: T) -> Ash<'a, T, C, true> {
-        Ash::<T, C, true>::new(value)
+impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+    pub fn new_unique(value: T) -> Genrc<'a, T, C, true> {
+        Genrc::<T, C, true>::new(value)
     }
 
     pub fn new(value: T) -> Self {
         let initial_strong_count = if UNIQ { 0 } else { 1 };
-        let b = Box::into_raw(Box::new(AshAlloc {
+        let b = Box::into_raw(Box::new(Alloc {
             header: Header {
                 strong: C::new(initial_strong_count),
                 weak: C::new(1),
@@ -74,25 +74,25 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
         }));
         let h = b as *mut Header<C>;
         let v = unsafe { ptr::addr_of!((*b).value) as *mut T };
-        Ash {
+        Genrc {
             header: unsafe { ptr::NonNull::new_unchecked(h) },
             ptr: unsafe { ptr::NonNull::new_unchecked(v) },
             phantom: PhantomData,
         }
     }
 
-    /// Constructs a new `Ash<T, C>` while giving you a `Weak<T, C>` to the allocation,
+    /// Constructs a new `Genrc<T, C>` while giving you a `Weak<T, C>` to the allocation,
     /// to allow you to construct a `T` which holds a weak pointer to itself.
     ///
     /// See `std::rc::Rc::new_cyclic` for more details.
-    pub fn new_cyclic<F>(data_fn: F) -> Ash<'a, T, C>
+    pub fn new_cyclic<F>(data_fn: F) -> Genrc<'a, T, C>
     where
         F: FnOnce(&Weak<'a, T, C>) -> T,
     {
         // Construct the inner in the "uninitialized" state with a single weak
         // reference. We don't set strong=1 yet so that if `f` panics, we don't
         // try to drop the uninitialized value.
-        let b = Box::into_raw(Box::new(AshAlloc {
+        let b = Box::into_raw(Box::new(Alloc {
             header: Header {
                 strong: C::new(0),
                 weak: C::new(1),
@@ -114,7 +114,7 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
         let h = weak.header();
         let old_strong = h.strong.inc_relaxed();
         debug_assert_eq!(old_strong, 0, "No prior strong references should exist");
-        let strong = Ash {
+        let strong = Genrc {
             header: weak.header,
             ptr: weak.ptr,
             phantom: PhantomData,
@@ -127,20 +127,20 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C> {
-    /// Return a `Ash<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
+impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
+    /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
     pub fn from_box(value: Box<T>) -> Self {
-        Ash::project(Ash::<Box<T>, C>::new(value), |x| &**x)
+        Genrc::project(Genrc::<Box<T>, C>::new(value), |x| &**x)
     }
 
-    /// Constructs a new `Ash<T, ...>` from a reference without copying.
+    /// Constructs a new `Genrc<T, ...>` from a reference without copying.
     pub fn from_ref(value: &'a T) -> Self {
-        Ash::project(Ash::<'a, &'a T, C>::new(value), |x| *x)
+        Genrc::project(Genrc::<'a, &'a T, C>::new(value), |x| *x)
     }
 
-    /// Convert `Ash<T>` to `Ash<U>`, as long as &T converts to &U.
+    /// Convert `Genrc<T>` to `Genrc<U>`, as long as &T converts to &U.
     ///
     /// This should be spelled `from()`, but that conflicts with the blanket
     /// impl converting T->T.
@@ -148,14 +148,14 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C> {
     /// TODO: this doesn't work for slices; there's no blanket impl
     /// `for<'a> &'a [T]: From<&'a [T; N]>` and I don't know why.
     /// So for now you must call `project()` explicitly.
-    pub fn cast<U: ?Sized>(this: Ash<'a, T, C>) -> Ash<'a, U, C>
+    pub fn cast<U: ?Sized>(this: Genrc<'a, T, C>) -> Genrc<'a, U, C>
     where
         &'a U: From<&'a T>,
     {
-        Ash::project(this, |x| From::from(x))
+        Genrc::project(this, |x| From::from(x))
     }
 
-    /// Returns true if two `Ash` pointers point to the same object. Note that
+    /// Returns true if two `Genrc` pointers point to the same object. Note that
     /// this is is not the same as sharing the same allocation: e.g. both might
     /// point to the same static object due to project(), or both might point
     /// to different subobjects of the same root pointer.
@@ -163,7 +163,7 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C> {
         this.ptr == other.ptr
     }
 
-    /// Returns true if two `Ash` pointers point to the same allocation, i.e.
+    /// Returns true if two `Genrc` pointers point to the same allocation, i.e.
     /// they share reference counts. Note that they may point to different
     /// subobjects within that allocation due to `project()`.
     pub fn root_ptr_eq(this: &Self, other: &Self) -> bool {
@@ -171,19 +171,19 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C, true> {
-    /// Return a `Ash<U>` for any type U contained within T, e.g. an element of a
+impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
+    /// Return a `Genrc<U>` for any type U contained within T, e.g. an element of a
     /// slice, or &dyn view of an object.
     pub fn project_mut<'b, U: ?Sized, F: FnOnce(&mut T) -> &mut U>(
         mut s: Self,
         f: F,
-    ) -> Ash<'b, U, C, true>
+    ) -> Genrc<'b, U, C, true>
     where
         T: 'a,
         U: 'b,
         'a: 'b,
     {
-        let u = Ash {
+        let u = Genrc {
             header: s.header,
             ptr: f(&mut *s).into(),
             phantom: PhantomData,
@@ -195,7 +195,7 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C, true> {
     }
 
     /// A unique ("Box") pointer can be lowered to a normal shared pointer
-    pub fn shared(this: Ash<'a, T, C, true>) -> Ash<'a, T, C, false> {
+    pub fn shared(this: Genrc<'a, T, C, true>) -> Genrc<'a, T, C, false> {
         // At this point, we may have weak pointers in other threads, so we need
         // to synchronize with them possibly being upgraded to strong pointers.
         // upgrade does an acquire on the strong count, so we need to increment
@@ -206,7 +206,7 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C, true> {
         let ptr = this.ptr;
         // Forget `this` so it doesn't adjust the refcount
         mem::forget(this);
-        Ash {
+        Genrc {
             header,
             ptr,
             phantom: PhantomData,
@@ -214,20 +214,23 @@ impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
-    /// Return a `Ash<U>` for any type U contained within T, e.g. an element of
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+    /// Return a `Genrc<U>` for any type U contained within T, e.g. an element of
     /// a slice, or &dyn view of an object.
     ///
     /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
     /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
     /// uniqueness.
-    pub fn project<U: ?Sized, F: FnOnce(&'a T) -> &'a U>(this: Self, f: F) -> Ash<'a, U, C, false> {
+    pub fn project<U: ?Sized, F: FnOnce(&'a T) -> &'a U>(
+        this: Self,
+        f: F,
+    ) -> Genrc<'a, U, C, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
             debug_assert_eq!(this.header().strong.get(), 0);
             this.header().strong.set_release(1);
         }
-        let u = Ash {
+        let u = Genrc {
             header: this.header,
             ptr: f(this.ptr()).into(),
             phantom: PhantomData,
@@ -238,7 +241,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     }
 
     /// Return a `sh::Weak` pointer to this object.
-    pub fn downgrade(this: &Ash<T, C, UNIQ>) -> Weak<'a, T, C> {
+    pub fn downgrade(this: &Genrc<T, C, UNIQ>) -> Weak<'a, T, C> {
         let h = this.header();
         h.weak.inc_relaxed();
         Weak {
@@ -252,7 +255,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     ///
     /// See also [`get_mut`], which is safe and does appropriate checks.
     ///
-    /// [`get_mut`]: Ash::get_mut
+    /// [`get_mut`]: Genrc::get_mut
     ///
     /// # Safety
     ///
@@ -268,8 +271,8 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
 
     #[inline]
     pub fn get_mut(this: &mut Self) -> Option<&mut T> {
-        if Ash::is_unique(this) {
-            unsafe { Some(Ash::get_mut_unchecked(this)) }
+        if Genrc::is_unique(this) {
+            unsafe { Some(Genrc::get_mut_unchecked(this)) }
         } else {
             None
         }
@@ -283,7 +286,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     /// cannot (yet) be upgraded.
     #[inline]
     fn is_unique(this: &Self) -> bool {
-        UNIQ || (Ash::weak_count(this) == 0 && Ash::strong_count(this) == 1)
+        UNIQ || (Genrc::weak_count(this) == 0 && Genrc::strong_count(this) == 1)
     }
 
     fn ptr(&self) -> &'a T {
@@ -312,10 +315,10 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
 }
 
 impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
-    pub fn upgrade(self: &Self) -> Option<Ash<'a, T, C>> {
+    pub fn upgrade(self: &Self) -> Option<Genrc<'a, T, C>> {
         let h = self.header();
         if h.strong.inc_if_nonzero() {
-            Some(Ash {
+            Some(Genrc {
                 header: self.header,
                 ptr: self.ptr,
                 phantom: PhantomData,
@@ -349,23 +352,25 @@ impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> AsRef<T> for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> AsRef<T> for Genrc<'a, T, C, UNIQ> {
     fn as_ref(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> borrow::Borrow<T> for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> borrow::Borrow<T>
+    for Genrc<'a, T, C, UNIQ>
+{
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity> Clone for Ash<'a, T, C> {
+impl<'a, T: ?Sized + 'a, C: Atomicity> Clone for Genrc<'a, T, C> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.strong.inc_relaxed();
-        Ash {
+        Genrc {
             header: self.header,
             ptr: self.ptr,
             phantom: PhantomData,
@@ -385,13 +390,13 @@ impl<'a, T: ?Sized, C: Atomicity> Clone for Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: Default + 'a, C: Atomicity, const UNIQ: bool> Default for Ash<'a, T, C, UNIQ> {
+impl<'a, T: Default + 'a, C: Atomicity, const UNIQ: bool> Default for Genrc<'a, T, C, UNIQ> {
     fn default() -> Self {
-        Ash::new(T::default())
+        Genrc::new(T::default())
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Deref for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Deref for Genrc<'a, T, C, UNIQ> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -401,7 +406,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Deref for Ash<'a, T, C,
 
 /// If we still have a unique reference, we can safely mutate the
 /// contents.
-impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Ash<'a, T, C, true> {
+impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Genrc<'a, T, C, true> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: ptr is always a valid reference, there's just no
         // way to spell the lifetime in Rust. Since we're a unique
@@ -410,7 +415,7 @@ impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Ash<'a, T, C, true> {
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> Drop for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNIQ> {
     fn drop(&mut self) {
         let h = self.header();
         if !UNIQ {
@@ -462,62 +467,62 @@ impl<'a, T: ?Sized, C: Atomicity> Drop for Weak<'a, T, C> {
 }
 
 /// A unique pointer can be lowered to a shared pointer.
-impl<'a, T: 'a, C: Atomicity> From<Ash<'a, T, C, true>> for Ash<'a, T, C, false> {
-    fn from(uniq: Ash<'a, T, C, true>) -> Self {
-        Ash::<'a, T, C, true>::shared(uniq)
+impl<'a, T: 'a, C: Atomicity> From<Genrc<'a, T, C, true>> for Genrc<'a, T, C, false> {
+    fn from(uniq: Genrc<'a, T, C, true>) -> Self {
+        Genrc::<'a, T, C, true>::shared(uniq)
     }
 }
 
 impl<'a, T: ?Sized + PartialEq + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
-    PartialEq<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
+    PartialEq<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
 {
     #[inline]
-    fn eq(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn eq(&self, other: &Genrc<T, C, Q2>) -> bool {
         // TODO: MarkerEq shenanigans for optimized
         // comparisons in the face of float idiocy.
         *(*self) == *(*other)
     }
 
     #[inline]
-    fn ne(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn ne(&self, other: &Genrc<T, C, Q2>) -> bool {
         *(*self) != *(*other)
     }
 }
 
 impl<'a, T: ?Sized + PartialOrd + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
-    PartialOrd<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
+    PartialOrd<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
 {
-    fn partial_cmp(&self, other: &Ash<T, C, Q2>) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Genrc<T, C, Q2>) -> Option<cmp::Ordering> {
         (**self).partial_cmp(&**other)
     }
 
-    fn lt(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn lt(&self, other: &Genrc<T, C, Q2>) -> bool {
         *(*self) < *(*other)
     }
 
-    fn le(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn le(&self, other: &Genrc<T, C, Q2>) -> bool {
         *(*self) <= *(*other)
     }
 
-    fn gt(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn gt(&self, other: &Genrc<T, C, Q2>) -> bool {
         *(*self) > *(*other)
     }
 
-    fn ge(&self, other: &Ash<T, C, Q2>) -> bool {
+    fn ge(&self, other: &Genrc<T, C, Q2>) -> bool {
         *(*self) >= *(*other)
     }
 }
 
-impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, const UNIQ: bool> cmp::Ord for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, const UNIQ: bool> cmp::Ord for Genrc<'a, T, C, UNIQ> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         (&**self).cmp(&**other)
     }
 }
 
-impl<'a, T: 'a + ?Sized + Eq, C: Atomicity, const UNIQ: bool> Eq for Ash<'a, T, C, UNIQ> {}
+impl<'a, T: 'a + ?Sized + Eq, C: Atomicity, const UNIQ: bool> Eq for Genrc<'a, T, C, UNIQ> {}
 
 impl<'a, T: 'a + ?Sized + fmt::Display, C: Atomicity, const UNIQ: bool> fmt::Display
-    for Ash<'a, T, C, UNIQ>
+    for Genrc<'a, T, C, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
@@ -525,14 +530,14 @@ impl<'a, T: 'a + ?Sized + fmt::Display, C: Atomicity, const UNIQ: bool> fmt::Dis
 }
 
 impl<'a, T: 'a + ?Sized + fmt::Debug, C: Atomicity, const UNIQ: bool> fmt::Debug
-    for Ash<'a, T, C, UNIQ>
+    for Genrc<'a, T, C, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> fmt::Pointer for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> fmt::Pointer for Genrc<'a, T, C, UNIQ> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
@@ -545,11 +550,11 @@ impl<'a, T: ?Sized + fmt::Debug, C: Atomicity> fmt::Debug for Weak<'a, T, C> {
 }
 
 unsafe fn drop_header<T, C: Atomicity>(ptr: *mut Header<C>) {
-    let _ = Box::from_raw(ptr as *mut AshAlloc<T, C>);
+    let _ = Box::from_raw(ptr as *mut Alloc<T, C>);
 }
 
 unsafe fn drop_value<T, C: Atomicity>(ptr: *mut Header<C>) {
-    let bptr = ptr as *mut AshAlloc<T, C>;
+    let bptr = ptr as *mut Alloc<T, C>;
     let bref = &mut *bptr;
     bref.value.assume_init_drop();
 }
