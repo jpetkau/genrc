@@ -57,10 +57,15 @@ pub struct Weak<'a, T: ?Sized, C: Atomicity> {
 }
 
 impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+    /// Constructs a new `GenRc<T>` with the given value.
+    ///
+    /// The returned pointer is known to be unique, so it
+    /// implements [`std::ops::DerefMut`]
     pub fn new_unique(value: T) -> Genrc<'a, T, C, true> {
         Genrc::<T, C, true>::new(value)
     }
 
+    /// Constructs a new `GenRc<T>` with the given value.
     pub fn new(value: T) -> Self {
         let initial_strong_count = if UNIQ { 0 } else { 1 };
         let b = Box::into_raw(Box::new(Alloc {
@@ -85,6 +90,10 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     /// to allow you to construct a `T` which holds a weak pointer to itself.
     ///
     /// See `std::rc::Rc::new_cyclic` for more details.
+    ///
+    /// Note that `RcBox<T>` (or `ArcBox<T>`) enable easier construction of
+    /// cyclic values; this is here mostly for `std` compatibility.
+    /// See the main crate documentation for examples.
     pub fn new_cyclic<F>(data_fn: F) -> Genrc<'a, T, C>
     where
         F: FnOnce(&Weak<'a, T, C>) -> T,
@@ -136,6 +145,13 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     }
 
     /// Constructs a new `Genrc<T, ...>` from a reference without copying.
+    ///
+    /// ```
+    /// use genrc::Rcl;
+    /// let x = 5;
+    /// let p : Rcl<i32> = Rcl::from_ref(&x);
+    /// assert!(std::ptr::eq(&*p, &x));
+    /// ```
     pub fn from_ref(value: &'a T) -> Self {
         Genrc::project(Genrc::<'a, &'a T, C>::new(value), |x| *x)
     }
