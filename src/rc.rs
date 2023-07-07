@@ -6,25 +6,28 @@
 use crate::ash;
 use std::cell::Cell;
 
-unsafe impl ash::Count for Cell<usize> {
+#[repr(transparent)]
+pub struct Nonatomic(Cell<usize>);
+
+unsafe impl ash::Count for Nonatomic {
     fn new(v: usize) -> Self {
-        Cell::new(v)
+        Nonatomic(Cell::new(v))
     }
 
     fn get(&self) -> usize {
-        Cell::get(self)
+        Cell::get(&self.0)
     }
 
     fn inc_relaxed(&self) -> usize {
         let i = self.get();
-        self.set(i + 1);
+        self.0.set(i + 1);
         i
     }
 
     fn inc_if_nonzero(&self) -> bool {
         let i = self.get();
         if i != 0 {
-            self.set(i + 1);
+            self.0.set(i + 1);
             true
         } else {
             false
@@ -32,33 +35,33 @@ unsafe impl ash::Count for Cell<usize> {
     }
 
     fn set_release(&self, value: usize) {
-        self.set(value);
+        self.0.set(value);
     }
 
     fn dec(&self) -> usize {
         let i = self.get();
-        self.set(i - 1);
+        self.0.set(i - 1);
         i
     }
 
     fn acquire_fence(&self) {}
 }
 
-pub type RcL<'a, T> = ash::Ash<'a, T, Cell<usize>, false>;
-pub type WeakL<'a, T> = ash::Weak<'a, T, Cell<usize>>;
-pub type Rc<T> = RcL<'static, T>;
-pub type Weak<T> = WeakL<'static, T>;
-pub type RcBox<'a, T> = ash::Ash<'a, T, Cell<usize>, true>;
+pub type Rcl<'a, T> = ash::Ash<'a, T, Nonatomic, false>;
+pub type Weakl<'a, T> = ash::Weak<'a, T, Nonatomic>;
+pub type Rc<T> = Rcl<'static, T>;
+pub type Weak<T> = Weakl<'static, T>;
+pub type RcBox<'a, T> = ash::Ash<'a, T, Nonatomic, true>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn counts<T>(x: &RcL<T>) -> (usize, usize) {
-        (RcL::strong_count(x), RcL::weak_count(x))
+    fn counts<T>(x: &Rcl<T>) -> (usize, usize) {
+        (Rcl::strong_count(x), Rcl::weak_count(x))
     }
-    fn wcounts<T>(x: &WeakL<T>) -> (usize, usize) {
-        (WeakL::strong_count(x), WeakL::weak_count(x))
+    fn wcounts<T>(x: &Weakl<T>) -> (usize, usize) {
+        (Weakl::strong_count(x), Weakl::weak_count(x))
     }
 
     struct DropCounter<'a, T>(T, &'a mut usize);
@@ -98,9 +101,9 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = RcL::new(DropCounter((1, 2), &mut n));
-            let y = RcL::project(x.clone(), |x| &x.0 .0);
-            let z = RcL::project(x.clone(), |x| &x.0 .1);
+            let x = Rcl::new(DropCounter((1, 2), &mut n));
+            let y = Rcl::project(x.clone(), |x| &x.0 .0);
+            let z = Rcl::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
             assert_eq!(*z, 2);
             assert_eq!(counts(&z), (3, 0));
@@ -204,11 +207,11 @@ mod tests {
         {
             // two objects with different allocations but the same address
             let obj = 1;
-            let p1: RcL<&i32> = RcL::new(&obj);
-            let p2: RcL<i32> = RcL::project(p1, |x| &**x);
-            let p3 = RcL::new(&obj);
-            let p4 = RcL::project(p3, |x| &**x);
-            assert!(RcL::ptr_eq(&p2, &p4));
+            let p1: Rcl<&i32> = Rcl::new(&obj);
+            let p2: Rcl<i32> = Rcl::project(p1, |x| &**x);
+            let p3 = Rcl::new(&obj);
+            let p4 = Rcl::project(p3, |x| &**x);
+            assert!(Rcl::ptr_eq(&p2, &p4));
         };
     }
 
@@ -250,6 +253,6 @@ mod tests {
         let root = RcBox::shared(root);
 
         // now we have a normal Rc to the parent, so we can upgrade child pointers
-        assert!(RcL::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
+        assert!(Rcl::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
     }
 }

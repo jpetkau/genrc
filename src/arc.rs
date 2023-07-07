@@ -10,66 +10,70 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 
-unsafe impl ash::Count for AtomicUsize {
+#[repr(transparent)]
+pub struct Atomic(AtomicUsize);
+
+unsafe impl ash::Count for Atomic {
     fn new(v: usize) -> Self {
-        AtomicUsize::new(v)
+        Atomic(AtomicUsize::new(v))
     }
 
     fn get(&self) -> usize {
         // relaxed ordering as this is only advisory
-        self.load(Relaxed)
+        self.0.load(Relaxed)
     }
 
     fn inc_relaxed(&self) -> usize {
-        self.fetch_add(1, Relaxed)
+        self.0.fetch_add(1, Relaxed)
     }
 
     fn set_release(&self, value: usize) {
-        self.store(value, Release)
+        self.0.store(value, Release)
     }
 
     fn inc_if_nonzero(&self) -> bool {
         // See std::sync::Arc<T> for explanation of atomic logic
-        self.fetch_update(
-            Acquire,
-            Relaxed,
-            |n| {
-                if n == 0 {
-                    None
-                } else {
-                    Some(n + 1)
-                }
-            },
-        )
-        .is_ok()
+        self.0
+            .fetch_update(
+                Acquire,
+                Relaxed,
+                |n| {
+                    if n == 0 {
+                        None
+                    } else {
+                        Some(n + 1)
+                    }
+                },
+            )
+            .is_ok()
     }
 
     fn dec(&self) -> usize {
-        self.fetch_sub(1, Release)
+        self.0.fetch_sub(1, Release)
     }
 
     fn acquire_fence(&self) {
         // either `fence()` or `load()` would work here, and either may be more
         // performant depending on platform details.
-        self.load(Acquire);
+        self.0.load(Acquire);
     }
 }
 
-pub type ArcL<'a, T> = ash::Ash<'a, T, AtomicUsize, false>;
-pub type WeakL<'a, T> = ash::Weak<'a, T, AtomicUsize>;
-pub type Arc<T> = ArcL<'static, T>;
-pub type Weak<T> = WeakL<'static, T>;
-pub type ArcBox<'a, T> = ash::Ash<'a, T, AtomicUsize, true>;
+pub type Arcl<'a, T> = ash::Ash<'a, T, Atomic, false>;
+pub type Weakl<'a, T> = ash::Weak<'a, T, Atomic>;
+pub type Arc<T> = Arcl<'static, T>;
+pub type Weak<T> = Weakl<'static, T>;
+pub type ArcBox<'a, T> = ash::Ash<'a, T, Atomic, true>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn counts<T>(x: &ArcL<T>) -> (usize, usize) {
-        (ArcL::strong_count(x), ArcL::weak_count(x))
+    fn counts<T>(x: &Arcl<T>) -> (usize, usize) {
+        (Arcl::strong_count(x), Arcl::weak_count(x))
     }
-    fn wcounts<T>(x: &WeakL<T>) -> (usize, usize) {
-        (WeakL::strong_count(x), WeakL::weak_count(x))
+    fn wcounts<T>(x: &Weakl<T>) -> (usize, usize) {
+        (Weakl::strong_count(x), Weakl::weak_count(x))
     }
 
     struct DropCounter<'a, T>(T, &'a mut usize);
@@ -109,9 +113,9 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = ArcL::new(DropCounter((1, 2), &mut n));
-            let y = ArcL::project(x.clone(), |x| &x.0 .0);
-            let z = ArcL::project(x.clone(), |x| &x.0 .1);
+            let x = Arcl::new(DropCounter((1, 2), &mut n));
+            let y = Arcl::project(x.clone(), |x| &x.0 .0);
+            let z = Arcl::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
             assert_eq!(*z, 2);
             assert_eq!(counts(&z), (3, 0));
@@ -211,16 +215,16 @@ mod tests {
         let b = Arc::project(a.clone(), |x| &x[0]);
         let c = Arc::project(a.clone(), |x| &x[1]);
         assert!(!Arc::ptr_eq(&b, &c));
-        assert!(ArcL::root_ptr_eq(&b, &c));
+        assert!(Arcl::root_ptr_eq(&b, &c));
 
         // two objects with different allocations but the same address
         let obj = 1;
-        let p1 = ArcL::new(&obj);
-        let p1 = ArcL::project(p1, |x| &**x);
-        let p2 = ArcL::new(&obj);
-        let p2 = ArcL::project(p2, |x| &**x);
-        assert!(ArcL::ptr_eq(&p1, &p2));
-        assert!(!ArcL::root_ptr_eq(&p1, &p2));
+        let p1 = Arcl::new(&obj);
+        let p1 = Arcl::project(p1, |x| &**x);
+        let p2 = Arcl::new(&obj);
+        let p2 = Arcl::project(p2, |x| &**x);
+        assert!(Arcl::ptr_eq(&p1, &p2));
+        assert!(!Arcl::root_ptr_eq(&p1, &p2));
     }
 
     #[test]

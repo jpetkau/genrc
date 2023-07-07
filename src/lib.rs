@@ -32,15 +32,16 @@ Unlike `std`, references can point to static data without copying, again using
     assert!(std::ptr::eq(&BIGBUF[..], &*p));
 ```
 
-There are also types `RcBox<T>` (and `ArcBox<T>`) that are returned from
-`new_unique()`, which take advantage of the fact that the initially created
+There are also types [`rc::RcBox<T>`] (and [`arc::ArcBox<T>`]) that are returned
+from [`rc::Rc::new_unique()`], which take advantage of the fact that a newly created
 pointer is still unique so can be used mutably. This allows you to create
-cyclic data structures without needing `RefCell` or using `new_cyclic()`:
+cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::new_cyclic`]:
+
 
 ```
     use ash::rc::{Rc, RcBox, Weak};
-    struct Node<'g> {
-        edges: Vec<Weak<'g, Node<'g>>>,
+    struct Node {
+        edges: Vec<Weak<Node>>,
     }
 
     // Make a graph
@@ -72,7 +73,46 @@ cyclic data structures without needing `RefCell` or using `new_cyclic()`:
 ```
 
 
-## The extra lifetime parameter
+## Lifetime powers
+
+One little-known ability of `std::{arc::Arc, rc::Rc}` is that you can put
+references with less than static lifetimes in them. For example, you can create
+a `std::rc::Rc` pointing to a local variable:
+
+```
+    use std::{cell::Cell, rc::Rc};
+    let x = Cell::new(1);
+    let y : Rc<&Cell<i32>> = Rc::new(&x);
+    x.set(2);
+    assert_eq!(y.get(), 2);
+```
+
+You can also point into allocated arenas this way, etc. Rust ensures that all
+the `Rc`'s are dropped before the referent is.
+
+But doing this is limited in usefulness, since now you have to use `Rc<&'a T>`
+everywhere instead of just `Rc<T>`, so the `Rc` isn't really keeping an object
+alive. You might as well just use `&'a T` directly.
+
+But with `project`, you can convert the `Rc<&T>` into an `Rc<T>` and use it
+normally. Except you can't _quite_ do that--that would be unsafe, as the
+lifetime is lost. You need to use `Rcl<T>` instead, which is the same as `Rc`
+but with a lifetime parameter. (`Rc<T>` is just a type alias for
+`Rcl<'static, T>`.)
+
+```
+    use ash::rc::Rcl;
+
+    // Imagine we have some JSON data that we loaded from a file
+    // (or data allocated in an arena, etc)
+    let bigdata : Vec<u8> = b"Not really json, use your imagination".to_vec();
+
+    // buf points directly into `bigdata`, not a copy
+    let buf : Rcl<[u8]> = Rcl::project(Rcl::new(&bigdata[..]), |x| *x);
+    assert!(std::ptr::eq(&bigdata[..], &*buf));
+```
+
+
 
 One difference that unfortunately makes this less of a trivial drop-in
 replacement is that `Rc` new has a lifetime parameter. This comes from
@@ -81,13 +121,6 @@ the interaction of two features.
 First: `std::rc::Rc` allows you to create an `Rc` pointing to a local
 variable. E.g. this is legal:
 
-```
-    use std::{cell::Cell, rc::Rc};
-    let x = Cell::new(1);
-    let y = Rc::new(&x);
-    x.set(2);
-    assert_eq!(y.get(), 2);
-```
 
 The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
 referent, so the RC can't outlive the referent.
@@ -148,6 +181,7 @@ entirely safely with `Option`:
     // ... later ...
     // initialize the object
     obj.replace(5);
+
     // project to the inner value that we just created
     let obj : Rc<i32> = RcBox::project(obj, |x| x.as_ref().unwrap());
 
@@ -155,8 +189,8 @@ entirely safely with `Option`:
 ```
 
 Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
-implementation. `Rc<T>` is an alias `Ash<T, Cell<usize>>` and `Arc<T>` is an
-alias for `Ash<T, AtomicUsize>`. This does make the documentation a little
+implementation. `Rc<T>` is an alias `Ash<T, Nonatomic>` and `Arc<T>` is an
+alias for `Ash<T, Atomic>`. This does make the documentation a little
 uglier, since it's all on struct `Ash` instead of the actual types you normally
 use.
 
@@ -209,8 +243,6 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
 
 
 ## Todo
-
-Better test coverage, including tsan
 
 Implement the various Unsize traits behind a feature. (They require nightly even
 though they've been unchanged since 1.0, and are required to fully implement

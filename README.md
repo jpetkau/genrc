@@ -107,10 +107,9 @@ entirely safely with `Option`:
 ```
 
 Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
-implementation. `Rc<T>` is an alias `Ash<T, Cell<usize>>` and `Arc<T>` is an
-alias for `Ash<T, AtomicUsize>`. This does make the documentation a little
-uglier, since it's all on struct `Ash` instead of the actual types you normally
-use.
+implementation. `Rc<T>` is an alias `Ash<T, Nonatomic>` and `Arc<T>` is an alias
+for `Ash<T, Atomic>`. This does make the documentation a little uglier, since
+it's all on struct `Ash` instead of the actual types you normally use.
 
 
 ### Differences from [`shared-rc`](https://lib.rs/crates/shared-rc)

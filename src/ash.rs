@@ -134,6 +134,11 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
         Ash::project(Ash::<Box<T>, C>::new(value), |x| &**x)
     }
 
+    /// Constructs a new `Ash<T, ...>` from a reference without copying.
+    pub fn from_ref(value: &'a T) -> Self {
+        Ash::project(Ash::<'a, &'a T, C>::new(value), |x| *x)
+    }
+
     /// Convert `Ash<T>` to `Ash<U>`, as long as &T converts to &U.
     ///
     /// This should be spelled `from()`, but that conflicts with the blanket
