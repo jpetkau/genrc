@@ -33,10 +33,11 @@ Unlike `std`, references can point to static data without copying, again using
     assert!(std::ptr::eq(&BIGBUF[..], &*p));
 ```
 
-There are also types `RcBox<T>` (and `ArcBox<T>`) that are returned from
-`new_unique()`, which take advantage of the fact that the initially created
+There are also types [`rc::RcBox<T>`] (and [`arc::ArcBox<T>`]) that are returned
+from [`rc::Rc::new_unique()`], which take advantage of the fact that a newly created
 pointer is still unique so can be used mutably. This allows you to create
-cyclic data structures without needing `RefCell` or using `new_cyclic()`:
+cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::new_cyclic`]:
+
 
 ```rust
     use ash::rc::{Rc, RcBox, Weak};
@@ -45,7 +46,7 @@ cyclic data structures without needing `RefCell` or using `new_cyclic()`:
     }
 
     // Make a graph
-    let mut graph: Vec<RcBox<Node>> = (0..5).map(|_| {
+    let mut graph: Vec<_> = (0..5).map(|_| {
         Rc::new_unique(Node { edges: vec![] })
     }).collect();
 
@@ -71,6 +72,82 @@ cyclic data structures without needing `RefCell` or using `new_cyclic()`:
     // cycles, no unsafe or internal mutation required.
     assert!(Rc::ptr_eq(&graph[0].edges[1].upgrade().unwrap(), &graph[2]));
 ```
+
+
+### Lifetime stuff
+
+`std::rc::Rc` allows you to create an `Rc` pointing to a local variable.
+E.g. this is legal:
+
+```rust
+    use std::{cell::Cell, rc::Rc};
+    let x = Cell::new(1);
+    let y : Rc<&Cell<i32>> = Rc::new(&x);
+    x.set(2);
+    assert_eq!(y.get(), 2);
+```
+
+The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
+referent, so the `Rc` can't outlive the referent.
+
+But `project()` lets you turn `ash::Rc<&'a T>` into an `Rc<T>` pointing to the
+same object. The latter type has nowhere for the lifetime `'a` to go, so
+if allowed this would let the reference live too long and be a soundness
+bug.
+
+To avoid this, the type [`ash::Rcl`] adds a lifetime parameter to `Rc`.
+In fact [`ash::Rc<T>`] is just a type alias for [`ash::Rcl<'static, T>`],
+and [`ash::Arc<T>`] is a type alias for [`ash::Arcl<'static, T>`].
+
+(And all of them are type aliases for [`ash::Ash`], which is generic over
+lifetime, referent type, uniqueness, and thread-safety. So you can write
+functions that are generic over `Arc` vs. `Rc` if desired.
+
+But doing this is limited in usefulness, since now you have to use `Rc<&'a T>`
+everywhere instead of just `Rc<T>`, so the `Rc` isn't really keeping an object
+alive. You might as well just use `&'a T` directly.
+
+But with `project`, you can convert the `Rc<&T>` into an `Rc<T>` and use it
+normally. Except you can't _quite_ do that--that would be unsafe, as the
+lifetime is lost. You need to use `Rcl<T>` instead, which is the same as `Rc`
+but with a lifetime parameter. (`Rc<T>` is just a type alias for
+`Rcl<'static, T>`.)
+
+```rust
+    use ash::rc::Rcl;
+
+    // Imagine we have some JSON data that we loaded from a file
+    // (or data allocated in an arena, etc)
+    let bigdata : Vec<u8> = b"Not really json, use your imagination".to_vec();
+
+    // buf points directly into `bigdata`, not a copy
+    let buf : Rcl<[u8]> = Rcl::project(Rcl::new(&bigdata[..]), |x| *x);
+    assert!(std::ptr::eq(&bigdata[..], &*buf));
+```
+
+
+There are a few ways this could be addressed:
+1. `project` could only be allowed if the source type is outlives the
+  return type. That would disallow the `Rc<&'a T> -> Rc<T>` conversion.
+  For most use backwards-compatible cases, that's fine; `Rc<T>` almost
+  always has `T: static` anyway.
+
+  But `project` make the problem case *useful*: you can use `Rc` to
+  manage a group of objects whose overall lifetime is still restricted
+  to a stack or arena allocation. So this would be a significant loss.
+
+2. Add a new type, call it `RcGeneral`, that has the lifetime parameter,
+  and define `type Rc<T> = RcGeneral<'static, T>`. That makes the it a
+  drop-in for the usual case, but fails in cases where the type `T` is
+  not `'static`.
+
+3. Just add the type parameter to `Rc`. Usually it can be inferred, but
+  in type definitions it will need to be explicit. This is the approach
+  this crate takes, which unfortunately makes it less of a drop-in
+  replacement since you have to add `<'static>` here and there. If there
+  was a way to infer the lifetime parameter in type definitions, that
+  would be avoidable.
+
 
 ### Differences from `std::sync::Arc` and `std::rc::Rc`
 
@@ -100,6 +177,7 @@ entirely safely with `Option`:
     // ... later ...
     // initialize the object
     obj.replace(5);
+
     // project to the inner value that we just created
     let obj : Rc<i32> = RcBox::project(obj, |x| x.as_ref().unwrap());
 
@@ -107,9 +185,10 @@ entirely safely with `Option`:
 ```
 
 Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
-implementation. `Rc<T>` is an alias `Ash<T, Nonatomic>` and `Arc<T>` is an alias
-for `Ash<T, Atomic>`. This does make the documentation a little uglier, since
-it's all on struct `Ash` instead of the actual types you normally use.
+implementation. `Rc<T>` is an alias `Ash<T, Nonatomic>` and `Arc<T>` is an
+alias for `Ash<T, Atomic>`. This does make the documentation a little
+uglier, since it's all on struct `Ash` instead of the actual types you normally
+use.
 
 
 ### Differences from [`shared-rc`](https://lib.rs/crates/shared-rc)
@@ -161,6 +240,10 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
 
 ### Todo
 
-Better test coverage, including tsan
+Implement the various Unsize traits behind a feature. (They require nightly even
+though they've been unchanged since 1.0, and are required to fully implement
+smart ptrs.)
 
-Make behavior match std when count overflows
+Make behavior match if count overflows
+
+License: MIT OR Apache-2.0
