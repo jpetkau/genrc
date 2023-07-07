@@ -13,7 +13,7 @@ use core::sync::atomic::{
 #[repr(transparent)]
 pub struct Atomic(AtomicUsize);
 
-unsafe impl ash::Count for Atomic {
+unsafe impl ash::Atomicity for Atomic {
     fn new(v: usize) -> Self {
         Atomic(AtomicUsize::new(v))
     }

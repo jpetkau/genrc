@@ -18,7 +18,7 @@ use std::{
     ptr,
 };
 
-pub unsafe trait Count {
+pub unsafe trait Atomicity {
     fn new(v: usize) -> Self;
     fn get(&self) -> usize;
     fn inc_relaxed(&self) -> usize;
@@ -42,20 +42,21 @@ struct AshAlloc<T, C> {
     value: MaybeUninit<T>,
 }
 
-/// This
-pub struct Ash<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool = false> {
+/// Generic implementation behind `Rc`, `Rcl`, `RcBox`, `Arc`, `Arcl`,
+/// and `ArcBox`.
+pub struct Ash<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
     phantom: PhantomData<&'a T>,
 }
 
-pub struct Weak<'a, T: ?Sized, C: Count> {
+pub struct Weak<'a, T: ?Sized, C: Atomicity> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
     phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
+impl<'a, T, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     pub fn new_unique(value: T) -> Ash<'a, T, C, true> {
         Ash::<T, C, true>::new(value)
     }
@@ -126,7 +127,7 @@ impl<'a, T, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     }
 }
 
-impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C> {
     /// Return a `Ash<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
@@ -170,7 +171,7 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
+impl<'a, T: ?Sized, C: Atomicity> Ash<'a, T, C, true> {
     /// Return a `Ash<U>` for any type U contained within T, e.g. an element of a
     /// slice, or &dyn view of an object.
     pub fn project_mut<'b, U: ?Sized, F: FnOnce(&mut T) -> &mut U>(
@@ -213,7 +214,7 @@ impl<'a, T: ?Sized, C: Count> Ash<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     /// Return a `Ash<U>` for any type U contained within T, e.g. an element of
     /// a slice, or &dyn view of an object.
     ///
@@ -310,7 +311,7 @@ impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Ash<'a, T, C, UNIQ> {
     }
 }
 
-impl<'a, T: ?Sized, C: Count> Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
     pub fn upgrade(self: &Self) -> Option<Ash<'a, T, C>> {
         let h = self.header();
         if h.strong.inc_if_nonzero() {
@@ -348,19 +349,19 @@ impl<'a, T: ?Sized, C: Count> Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> AsRef<T> for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> AsRef<T> for Ash<'a, T, C, UNIQ> {
     fn as_ref(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> borrow::Borrow<T> for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> borrow::Borrow<T> for Ash<'a, T, C, UNIQ> {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Count> Clone for Ash<'a, T, C> {
+impl<'a, T: ?Sized + 'a, C: Atomicity> Clone for Ash<'a, T, C> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.strong.inc_relaxed();
@@ -372,7 +373,7 @@ impl<'a, T: ?Sized + 'a, C: Count> Clone for Ash<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized, C: Count> Clone for Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity> Clone for Weak<'a, T, C> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.weak.inc_relaxed();
@@ -384,13 +385,13 @@ impl<'a, T: ?Sized, C: Count> Clone for Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: Default + 'a, C: Count, const UNIQ: bool> Default for Ash<'a, T, C, UNIQ> {
+impl<'a, T: Default + 'a, C: Atomicity, const UNIQ: bool> Default for Ash<'a, T, C, UNIQ> {
     fn default() -> Self {
         Ash::new(T::default())
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Deref for Ash<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Deref for Ash<'a, T, C, UNIQ> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -400,7 +401,7 @@ impl<'a, T: ?Sized + 'a, C: Count, const UNIQ: bool> Deref for Ash<'a, T, C, UNI
 
 /// If we still have a unique reference, we can safely mutate the
 /// contents.
-impl<'a, T: 'a + ?Sized, C: Count> DerefMut for Ash<'a, T, C, true> {
+impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Ash<'a, T, C, true> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: ptr is always a valid reference, there's just no
         // way to spell the lifetime in Rust. Since we're a unique
@@ -409,7 +410,7 @@ impl<'a, T: 'a + ?Sized, C: Count> DerefMut for Ash<'a, T, C, true> {
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Count, const UNIQ: bool> Drop for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> Drop for Ash<'a, T, C, UNIQ> {
     fn drop(&mut self) {
         let h = self.header();
         if !UNIQ {
@@ -444,7 +445,7 @@ impl<'a, T: 'a + ?Sized, C: Count, const UNIQ: bool> Drop for Ash<'a, T, C, UNIQ
     }
 }
 
-impl<'a, T: ?Sized, C: Count> Drop for Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity> Drop for Weak<'a, T, C> {
     fn drop(&mut self) {
         let h = self.header();
         if h.weak.dec() != 1 {
@@ -461,13 +462,13 @@ impl<'a, T: ?Sized, C: Count> Drop for Weak<'a, T, C> {
 }
 
 /// A unique pointer can be lowered to a shared pointer.
-impl<'a, T: 'a, C: Count> From<Ash<'a, T, C, true>> for Ash<'a, T, C, false> {
+impl<'a, T: 'a, C: Atomicity> From<Ash<'a, T, C, true>> for Ash<'a, T, C, false> {
     fn from(uniq: Ash<'a, T, C, true>) -> Self {
         Ash::<'a, T, C, true>::shared(uniq)
     }
 }
 
-impl<'a, T: ?Sized + PartialEq + 'a, C: Count, const Q1: bool, const Q2: bool>
+impl<'a, T: ?Sized + PartialEq + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
     PartialEq<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
 {
     #[inline]
@@ -483,7 +484,7 @@ impl<'a, T: ?Sized + PartialEq + 'a, C: Count, const Q1: bool, const Q2: bool>
     }
 }
 
-impl<'a, T: ?Sized + PartialOrd + 'a, C: Count, const Q1: bool, const Q2: bool>
+impl<'a, T: ?Sized + PartialOrd + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
     PartialOrd<Ash<'a, T, C, Q2>> for Ash<'a, T, C, Q1>
 {
     fn partial_cmp(&self, other: &Ash<T, C, Q2>) -> Option<cmp::Ordering> {
@@ -507,15 +508,15 @@ impl<'a, T: ?Sized + PartialOrd + 'a, C: Count, const Q1: bool, const Q2: bool>
     }
 }
 
-impl<'a, T: 'a + ?Sized + Ord, C: Count, const UNIQ: bool> cmp::Ord for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, const UNIQ: bool> cmp::Ord for Ash<'a, T, C, UNIQ> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         (&**self).cmp(&**other)
     }
 }
 
-impl<'a, T: 'a + ?Sized + Eq, C: Count, const UNIQ: bool> Eq for Ash<'a, T, C, UNIQ> {}
+impl<'a, T: 'a + ?Sized + Eq, C: Atomicity, const UNIQ: bool> Eq for Ash<'a, T, C, UNIQ> {}
 
-impl<'a, T: 'a + ?Sized + fmt::Display, C: Count, const UNIQ: bool> fmt::Display
+impl<'a, T: 'a + ?Sized + fmt::Display, C: Atomicity, const UNIQ: bool> fmt::Display
     for Ash<'a, T, C, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -523,7 +524,7 @@ impl<'a, T: 'a + ?Sized + fmt::Display, C: Count, const UNIQ: bool> fmt::Display
     }
 }
 
-impl<'a, T: 'a + ?Sized + fmt::Debug, C: Count, const UNIQ: bool> fmt::Debug
+impl<'a, T: 'a + ?Sized + fmt::Debug, C: Atomicity, const UNIQ: bool> fmt::Debug
     for Ash<'a, T, C, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -531,23 +532,23 @@ impl<'a, T: 'a + ?Sized + fmt::Debug, C: Count, const UNIQ: bool> fmt::Debug
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Count, const UNIQ: bool> fmt::Pointer for Ash<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> fmt::Pointer for Ash<'a, T, C, UNIQ> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
 }
 
-impl<'a, T: ?Sized + fmt::Debug, C: Count> fmt::Debug for Weak<'a, T, C> {
+impl<'a, T: ?Sized + fmt::Debug, C: Atomicity> fmt::Debug for Weak<'a, T, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(Weak)")
     }
 }
 
-unsafe fn drop_header<T, C: Count>(ptr: *mut Header<C>) {
+unsafe fn drop_header<T, C: Atomicity>(ptr: *mut Header<C>) {
     let _ = Box::from_raw(ptr as *mut AshAlloc<T, C>);
 }
 
-unsafe fn drop_value<T, C: Count>(ptr: *mut Header<C>) {
+unsafe fn drop_value<T, C: Atomicity>(ptr: *mut Header<C>) {
     let bptr = ptr as *mut AshAlloc<T, C>;
     let bref = &mut *bptr;
     bref.value.assume_init_drop();

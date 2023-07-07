@@ -73,11 +73,10 @@ cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::
 ```
 
 
-## Lifetime powers
+## Lifetime stuff
 
-One little-known ability of `std::{arc::Arc, rc::Rc}` is that you can put
-references with less than static lifetimes in them. For example, you can create
-a `std::rc::Rc` pointing to a local variable:
+`std::rc::Rc` allows you to create an `Rc` pointing to a local variable.
+E.g. this is legal:
 
 ```
     use std::{cell::Cell, rc::Rc};
@@ -87,8 +86,21 @@ a `std::rc::Rc` pointing to a local variable:
     assert_eq!(y.get(), 2);
 ```
 
-You can also point into allocated arenas this way, etc. Rust ensures that all
-the `Rc`'s are dropped before the referent is.
+The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
+referent, so the `Rc` can't outlive the referent.
+
+But `project()` lets you turn `ash::Rc<&'a T>` into an `Rc<T>` pointing to the
+same object. The latter type has nowhere for the lifetime `'a` to go, so
+if allowed this would let the reference live too long and be a soundness
+bug.
+
+To avoid this, the type [`ash::Rcl`] adds a lifetime parameter to `Rc`.
+In fact [`ash::Rc<T>`] is just a type alias for [`ash::Rcl<'static, T>`],
+and [`ash::Arc<T>`] is a type alias for [`ash::Arcl<'static, T>`].
+
+(And all of them are type aliases for [`ash::Ash`], which is generic over
+lifetime, referent type, uniqueness, and thread-safety. So you can write
+functions that are generic over `Arc` vs. `Rc` if desired.
 
 But doing this is limited in usefulness, since now you have to use `Rc<&'a T>`
 everywhere instead of just `Rc<T>`, so the `Rc` isn't really keeping an object
@@ -112,23 +124,6 @@ but with a lifetime parameter. (`Rc<T>` is just a type alias for
     assert!(std::ptr::eq(&bigdata[..], &*buf));
 ```
 
-
-
-One difference that unfortunately makes this less of a trivial drop-in
-replacement is that `Rc` new has a lifetime parameter. This comes from
-the interaction of two features.
-
-First: `std::rc::Rc` allows you to create an `Rc` pointing to a local
-variable. E.g. this is legal:
-
-
-The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
-referent, so the RC can't outlive the referent.
-
-But `project` lets you turn `Rc<&'a T>` into an `Rc<T>` pointing to the
-same object. The latter type has nowhere for the lifetime `'a` to go, so
-if allowed this would let the reference live too long and be a soundness
-hole.
 
 There are a few ways this could be addressed:
 1. `project` could only be allowed if the source type is outlives the
@@ -253,3 +248,7 @@ Make behavior match if count overflows
 pub mod arc;
 pub mod ash;
 pub mod rc;
+
+pub use arc::{Arc, ArcBox, Arcl, Atomic};
+pub use ash::{Ash, Atomicity};
+pub use rc::{Nonatomic, Rc, RcBox, Rcl};

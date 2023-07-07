@@ -9,7 +9,7 @@ use std::cell::Cell;
 #[repr(transparent)]
 pub struct Nonatomic(Cell<usize>);
 
-unsafe impl ash::Count for Nonatomic {
+unsafe impl ash::Atomicity for Nonatomic {
     fn new(v: usize) -> Self {
         Nonatomic(Cell::new(v))
     }
