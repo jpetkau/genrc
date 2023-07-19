@@ -15,16 +15,28 @@ use std::{
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
-    ptr,
+    ptr::{self, NonNull},
 };
 
-pub unsafe trait Atomicity {
+/// Trait to distinguish [`Rc<T>`][crate::Rc] from [`Arc<T>`][crate::Arc]. The
+/// only implementers are [`Atomic`][crate::Atomic] and [`Nonatomic`][crate::Nonatomic].
+///
+/// It is `pub` so you can write code that's generic over atomicity, but there's
+/// no reason to implement it for any other types.
+pub unsafe trait Atomicity: private::Sealed {
+    #[doc(hidden)]
     fn new(v: usize) -> Self;
+    #[doc(hidden)]
     fn get(&self) -> usize;
+    #[doc(hidden)]
     fn inc_relaxed(&self) -> usize;
+    #[doc(hidden)]
     fn set_release(&self, value: usize);
+    #[doc(hidden)]
     fn inc_if_nonzero(&self) -> bool;
+    #[doc(hidden)]
     fn dec(&self) -> usize;
+    #[doc(hidden)]
     fn acquire_fence(&self);
 }
 
@@ -44,12 +56,14 @@ struct Alloc<T, C> {
 
 /// Generic implementation behind `Rc`, `Rcl`, `RcBox`, `Arc`, `Arcl`,
 /// and `ArcBox`.
-pub struct Genrc<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool = false> {
+pub struct Genrc<'a, T: ?Sized, C: Atomicity, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
-    phantom: PhantomData<&'a T>,
+    phantom: PhantomData<(&'a (), T)>,
 }
 
+/// Generic implementation behind `rc::Weak` and `arc::Weak`, distinguished
+/// by `Atomicity`.
 pub struct Weak<'a, T: ?Sized, C: Atomicity> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
@@ -97,6 +111,7 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     pub fn new_cyclic<F>(data_fn: F) -> Genrc<'a, T, C>
     where
         F: FnOnce(&Weak<'a, T, C>) -> T,
+        T: 'a,
     {
         // Construct the inner in the "uninitialized" state with a single weak
         // reference. We don't set strong=1 yet so that if `f` panics, we don't
@@ -140,7 +155,10 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
-    pub fn from_box(value: Box<T>) -> Self {
+    pub fn from_box(value: Box<T>) -> Self
+    where
+        T: 'a,
+    {
         Genrc::project(Genrc::<Box<T>, C>::new(value), |x| &**x)
     }
 
@@ -153,7 +171,7 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// assert!(std::ptr::eq(&*p, &x));
     /// ```
     pub fn from_ref(value: &'a T) -> Self {
-        Genrc::project(Genrc::<'a, &'a T, C>::new(value), |x| *x)
+        Genrc::project(Genrc::<'a, &'a T, C>::new(value), Deref::deref)
     }
 
     /// Convert `Genrc<T>` to `Genrc<U>`, as long as &T converts to &U.
@@ -166,7 +184,9 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// So for now you must call `project()` explicitly.
     pub fn cast<U: ?Sized>(this: Genrc<'a, T, C>) -> Genrc<'a, U, C>
     where
-        &'a U: From<&'a T>,
+        T: 'a,
+        U: 'a,
+        for<'u> &'u U: From<&'u T>,
     {
         Genrc::project(this, |x| From::from(x))
     }
@@ -188,8 +208,8 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
 }
 
 impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
-    /// Return a `Genrc<U>` for any type U contained within T, e.g. an element of a
-    /// slice, or &dyn view of an object.
+    /// Return an `RcBox<U>` for any type U contained within T, e.g. an element
+    /// of a slice, or &dyn view of an object.
     pub fn project_mut<'b, U: ?Sized, F: FnOnce(&mut T) -> &mut U>(
         mut s: Self,
         f: F,
@@ -208,6 +228,21 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
         // into u.
         mem::forget(s);
         u
+    }
+
+    /// Constructs a new `RcBox<T, ...>` from a reference without copying.
+    ///
+    /// ```
+    /// use genrc::RcBox;
+    /// let mut x = 5;
+    /// {
+    ///     let mut p : RcBox<i32> = RcBox::from_mut_ref(&mut x);
+    ///     *p = 6;
+    /// }
+    /// assert_eq!(x, 6);
+    /// ```
+    pub fn from_mut_ref(value: &'a mut T) -> Self {
+        Genrc::project_mut(Genrc::<&'a mut T, C, true>::new(value), DerefMut::deref_mut)
     }
 
     /// A unique ("Box") pointer can be lowered to a normal shared pointer
@@ -230,17 +265,33 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     /// Return a `Genrc<U>` for any type U contained within T, e.g. an element of
     /// a slice, or &dyn view of an object.
     ///
     /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
     /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
     /// uniqueness.
-    pub fn project<U: ?Sized, F: FnOnce(&'a T) -> &'a U>(
+    pub fn project<'u, U: ?Sized, F: FnOnce(&T) -> &U>(this: Self, f: F) -> Genrc<'u, U, C, false> {
+        let ptr = f(this.ptr()).into();
+        Self::projected(this, ptr)
+    }
+
+    /// Fallible version of `project()`.
+    pub fn try_project<'u, U: ?Sized, F: FnOnce(&T) -> Option<&U>>(
         this: Self,
         f: F,
-    ) -> Genrc<'a, U, C, false> {
+    ) -> Option<Genrc<'u, U, C, false>> {
+        match f(this.ptr()) {
+            None => None,
+            Some(u) => {
+                let ptr = u.into();
+                Some(Self::projected(this, ptr))
+            }
+        }
+    }
+
+    fn projected<'u, U: ?Sized>(this: Self, ptr: NonNull<U>) -> Genrc<'u, U, C, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
             debug_assert_eq!(this.header().strong.get(), 0);
@@ -248,7 +299,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         }
         let u = Genrc {
             header: this.header,
-            ptr: f(this.ptr()).into(),
+            ptr,
             phantom: PhantomData,
         };
         // Forget s so it doesn't adjust the refcount, since we moved it into u.
@@ -256,7 +307,7 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         u
     }
 
-    /// Return a `sh::Weak` pointer to this object.
+    /// Return a [`Weak`] pointer to this object.
     pub fn downgrade(this: &Genrc<T, C, UNIQ>) -> Weak<'a, T, C> {
         let h = this.header();
         h.weak.inc_relaxed();
@@ -306,8 +357,8 @@ impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     }
 
     fn ptr(&self) -> &'a T {
-        // Safety: ptr is always a valid reference, there's just no
-        // way to spell the lifetime in Rust.
+        // Safety: ptr is always a valid reference, there's just no way to
+        // spell the lifetime in Rust, so callers manage it with refcounts.
         unsafe { self.ptr.as_ref() }
     }
 
@@ -431,7 +482,7 @@ impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Genrc<'a, T, C, true> {
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNIQ> {
     fn drop(&mut self) {
         let h = self.header();
         if !UNIQ {
@@ -573,4 +624,8 @@ unsafe fn drop_value<T, C: Atomicity>(ptr: *mut Header<C>) {
     let bptr = ptr as *mut Alloc<T, C>;
     let bref = &mut *bptr;
     bref.value.assume_init_drop();
+}
+
+pub(crate) mod private {
+    pub trait Sealed {}
 }

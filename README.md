@@ -1,12 +1,12 @@
 # genrc
 
-This crate provides alternatives to `Arc` and `Rc` which are (almost) drop-in
-replacements, but allow refcounted pointers to subobjects, like C++'s
-`shared_ptr`.
+This crate provides alternatives to [`std::sync::Arc`] and [`std::rc::Rc`] which
+are (almost) drop-in replacements, but allow refcounted pointers to subobjects,
+like C++'s [`shared_ptr`](https://en.cppreference.com/w/cpp/memory/shared_ptr).
 
 The main feature, which adds a surprising amount of flexibility: if you have an
 `Rc<T>`, and `T` contains some subobject of type `U`, then you can construct an
-`Rc<U>` that shares ownership with the original object, by calling
+`Rc<U>` that shares ownership with the original object by calling
 `Rc::project()`.
 
 ```rust
@@ -20,33 +20,47 @@ The main feature, which adds a surprising amount of flexibility: if you have an
     let c: Rc<i32> = Rc::project(b, |x| &x[1]);
 ```
 
-Unlike `std`, references can point to static data without copying, again using
-`project()`:
+There are also types [`RcBox<T>`] (and [`ArcBox<T>`]) that are returned from
+[`new_unique()`][Rc::new_unique], which take advantage of the fact that a newly
+created refcounted pointer is still unique, so can be used mutably.
+
+
+## Uses
+
+### Easier and safer initialization
+
+You can use `RcBox<Option<T>>` to indicate not-yet-initialized types instead of
+the the various unsafe `MaybeInit`-related APIs in `std::rc`. After the object
+is initialized, you can use `project` to convert it to a plain `Rc<T>`:
 
 ```rust
-    # usegenrcc::rc::Rc;
-    static BIGBUF: [u8; 1024] = [1; 1024];
+    # use genrc::rc::{Rc, RcBox, Weak};
+    // construct the object initially uninitialized
+    // we could use `Rc::get_mut` instead of `RcBox` here.
+    let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
 
-    let p: Rc<()> = Rc::new(());
-    let p: Rc<[u8]> = Rc::project(p, |_| &BIGBUF[..]);
+    // ... later ...
+    // initialize the object
+    obj.replace(5);
 
-    assert!(std::ptr::eq(&BIGBUF[..], &*p));
+    // project to the inner value that we just created
+    let obj : Rc<i32> = RcBox::project(obj, |x| x.as_ref().unwrap());
+
+    assert_eq!(*obj, 5);
 ```
 
-There are also types [`rc::RcBox<T>`] (and [`arc::ArcBox<T>`]) that are returned
-from [`rc::Rc::new_unique()`], which take advantage of the fact that a newly created
-pointer is still unique so can be used mutably. This allows you to create
-cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::new_cyclic`]:
+You can also create cyclic data structures without needing
+[`RefCell`][std::cell::RefCell] or [`new_cyclic`][std::rc::Rc::new_cyclic]:
 
 
 ```rust
-    usegenrcc::rc::{Rc, RcBox, Weak};
+    use genrc::rc::{Rc, RcBox, Weak};
     struct Node {
         edges: Vec<Weak<Node>>,
     }
 
     // Make a graph
-    let mut graph: Vec<_> = (0..5).map(|_| {
+    let mut graph: Vec<RcBox<Node>> = (0..5).map(|_| {
         Rc::new_unique(Node { edges: vec![] })
     }).collect();
 
@@ -73,8 +87,28 @@ cyclic data structures without needing [`std::cell::RefCell`] or [`std::rc::Rc::
     assert!(Rc::ptr_eq(&graph[0].edges[1].upgrade().unwrap(), &graph[2]));
 ```
 
+### Static data
 
-### Lifetime stuff
+Unlike `std`, references can point to static data without copying, again using
+`project()`:
+
+```rust
+    # use genrc::rc::Rc;
+    static BIGBUF: [u8; 1024] = [1; 1024];
+
+    let p: Rc<()> = Rc::new(());
+    let p: Rc<[u8]> = Rc::project(p, |_| &BIGBUF[..]);
+
+    assert!(std::ptr::eq(&BIGBUF[..], &*p));
+```
+
+So you can use `Rc` to keep track of possibly-owned, possibly-static data,
+similar to `Cow`.
+
+
+## Notes
+
+## Lifetime stuff
 
 `std::rc::Rc` allows you to create an `Rc` pointing to a local variable.
 E.g. this is legal:
@@ -90,78 +124,46 @@ E.g. this is legal:
 The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
 referent, so the `Rc` can't outlive the referent.
 
-But `project()` lets you turn genrcc::Rc<&'a T>` into an `Rc<T>` pointing to the
-same object. The latter type has nowhere for the lifetime `'a` to go, so
-if allowed this would let the reference live too long and be a soundness
-bug.
+But `project()` lets you turn `genrc::Rc<&'a T>` into an `Rc<T>` pointing to the
+same object. The latter type has nowhere for the lifetime `'a` to go, so if
+allowed this would let the reference live too long and be a soundness bug.
 
-To avoid this, the type [genrcc::Rcl`] adds a lifetime parameter to `Rc`.
-In fact [genrcc::Rc<T>`] is just a type alias for [genrcc::Rcl<'static, T>`],
-and [genrcc::Arc<T>`] is a type alias for [genrcc::Arcl<'static, T>`].
+To avoid this, the type [`Rcl`] adds a lifetime parameter to `Rc`.
 
-(And all of them are type aliases for [genrcc::Genrc`], which is generic over
-lifetime, referent type, uniqueness, and thread-safety. So you can write
-functions that are generic over `Arc` vs. `Rc` if desired.
+(In fact [`Rc<T>`] is just an alias for `Rcl<'static, T>`, and [`Arc<T>`] is an
+alias for `Arcl<'static, T>`. And all of them are aliases for [`genrc::Genrc`],
+which is generic over lifetime, referent type, uniqueness, and atomicity.)
 
-But doing this is limited in usefulness, since now you have to use `Rc<&'a T>`
-everywhere instead of just `Rc<T>`, so the `Rc` isn't really keeping an object
-alive. You might as well just use `&'a T` directly.
-
-But with `project`, you can convert the `Rc<&T>` into an `Rc<T>` and use it
-normally. Except you can't _quite_ do that--that would be unsafe, as the
-lifetime is lost. You need to use `Rcl<T>` instead, which is the same as `Rc`
-but with a lifetime parameter. (`Rc<T>` is just a type alias for
-`Rcl<'static, T>`.)
+To use `project()` such on a short-lived reference, you must use
+`Rcl::project()`, which returns an `Rcl` with a non-static lifetime.
 
 ```rust
-    usegenrcc::rc::Rcl;
+    use genrc::rc::Rcl;
 
     // Imagine we have some JSON data that we loaded from a file
     // (or data allocated in an arena, etc)
     let bigdata : Vec<u8> = b"Not really json, use your imagination".to_vec();
 
     // buf points directly into `bigdata`, not a copy
-    let buf : Rcl<[u8]> = Rcl::project(Rcl::new(&bigdata[..]), |x| *x);
-    assert!(std::ptr::eq(&bigdata[..], &*buf));
+    let buf : Rcl<[u8]> = Rcl::from_ref(&bigdata[..]);
+    assert!(std::ptr::eq(&*buf, &bigdata[..]));
+
+    let word : Rcl<[u8]> = Rcl::project(buf, |x| &x[4..10]);
+    assert!(std::ptr::eq(&*word, &bigdata[4..10]));
 ```
-
-
-There are a few ways this could be addressed:
-1. `project` could only be allowed if the source type is outlives the
-  return type. That would disallow the `Rc<&'a T> -> Rc<T>` conversion.
-  For most use backwards-compatible cases, that's fine; `Rc<T>` almost
-  always has `T: static` anyway.
-
-  But `project` make the problem case *useful*: you can use `Rc` to
-  manage a group of objects whose overall lifetime is still restricted
-  to a stack or arena allocation. So this would be a significant loss.
-
-2. Add a new type, call it `RcGeneral`, that has the lifetime parameter,
-  and define `type Rc<T> = RcGeneral<'static, T>`. That makes the it a
-  drop-in for the usual case, but fails in cases where the type `T` is
-  not `'static`.
-
-3. Just add the type parameter to `Rc`. Usually it can be inferred, but
-  in type definitions it will need to be explicit. This is the approach
-  this crate takes, which unfortunately makes it less of a drop-in
-  replacement since you have to add `<'static>` here and there. If there
-  was a way to infer the lifetime parameter in type definitions, that
-  would be avoidable.
-
 
 ### Differences from `std::sync::Arc` and `std::rc::Rc`
 
 `Rc::from_box` does not copy the object from the original box. Instead it
 takes ownership of the box as-is, with the counts in a separate allocation.
 
-If you leak so many Rc objects that the refcount overflows, the std
-pointers will abort. genrcc` does not, because there is no `abort()`
-function in `no_std`.
+If you leak so many Rc objects that the refcount overflows, the std pointers
+will abort. `genrc` does not, because there is no `abort()` function in
+`no_std`.
 
-Implicit conversion from `Rc<T>` to `Rc<dyn Trait>` is not supported,
-because that requires some unstable traits. However you can do the
-conversion explicitly with `Rc::project`. [TODO: support this behind a
-nightly-requiring feature.]
+Implicit conversion from `Rc<T>` to `Rc<dyn Trait>` is not supported, because
+that requires some unstable traits. However you can do the conversion explicitly
+with `Rc::project`. [TODO: support this behind a nightly-requiring feature.]
 
 The std pointers have various `MaybeUninit`-related methods for initializing
 objects after allocation. That API isn't possible in Genrc, because the initial
@@ -169,7 +171,7 @@ object is type-erased. However, `project` allows you to do the same thing
 entirely safely with `Option`:
 
 ```rust
-    # usegenrcc::rc::{Rc, RcBox, Weak};
+    # use genrc::rc::{Rc, RcBox, Weak};
     // construct the object initially uninitialized
     // we could use `Rc::get_mut` instead of `RcBox` here.
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
@@ -185,11 +187,22 @@ entirely safely with `Option`:
 ```
 
 Unlike in std, `Rc` and `Arc` (and `RcBox` and `ArcBox`) share a single generic
-implementation. `Rc<T>` is an alias `Genrc<T, Nonatomic>` and `Arc<T>` is an
-alias for `Genrc<T, Atomic>`. This does make the documentation a little
-uglier, since it's all on struct `Genrc` instead of the actual types you normally
-use.
+implementation. `Rc<T>` is an alias `Genrc<'static, T, Nonatomic>` and `Arc<T>`
+is an alias for `Genrc<'static, T, Atomic>`. This does make the documentation a
+little uglier, since it's all on struct `Genrc` instead of the actual types you
+normally care about.
 
+`std::rc::Rc::ptr_eq(a,b)` returns true if a and b share the same allocation,
+which is the same as asking if they're equal pointers. But in `genrc`,
+these are two different questions: you can have pointers to two different
+subobjects from the same allocation, or pointers that came from two different
+allocations that are pointing to the same object! (E.g. they may have been
+projected to a static object). So here we have `Rc::ptr_eq` which is equivalent
+to `std::ptr::eq(&*a, &*b)`, and `Rc::root_ptr_eq` which checks if the counts
+are shared.
+
+`from_raw` and `into_raw` are not available because there may be no relationship
+between the returned pointer and the original allocation.
 
 ### Differences from [`shared-rc`](https://lib.rs/crates/shared-rc)
 
@@ -201,12 +214,12 @@ differences:
   cannot support zero-alloc usage.
 
 * `shared-rc` includes an `Owner` type param, with an explicit `erase_owner`
-  method to hide it. genrcc::arc::Arc` always type-erases the owner. This
+  method to hide it. `genrc::arc::Arc` always type-erases the owner. This
   saves one word of overhead in the pointer when a type-erased `shared-rc` is
   pointing to an unsized type.
-  (e.g. `shared_rc::rc::[u8]` is 32 bytes, but genrcc::rc::[u8]` is 24.)
+  (e.g. `shared_rc::rc::[u8]` is 32 bytes, but `genrc::rc::[u8]` is 24.)
 
-* genrcc` is generic over atomic vs. shared. `shared-rc` uses macros for that,
+* `genrc` is generic over atomic vs. shared. `shared-rc` uses macros for that,
   which makes the rustdocs harder to read but "go to definition" easier to
   read.
 
@@ -221,8 +234,8 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
   to allow weak pointers to its `RcBox` types, so it cannot replace
   `new_cyclic` as in the graph example above.
 
-* The implementation in genrcc` is generic over whether the pointer is
-  unique or not (`RcBox<T>` is `Rc<T, true>`). This allows writing
+* The implementation in `genrc` is generic over whether the pointer is
+  unique or not (the UNIQ parameter to GenRc). This allows writing
   code generic over the uniqueness of the pointer, which may be useful
   for initialization (like the graph-creating example above, where the
   graph is a `Vec<RcBox<Node>>` during initialization, then gets converted
@@ -240,10 +253,18 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
 
 ### Todo
 
+Allocator support. (Important, because unlike `std::Rc` this allows erasing the
+allocator so interoperability
+
 Implement the various Unsize traits behind a feature. (They require nightly even
 though they've been unchanged since 1.0, and are required to fully implement
 smart ptrs.)
 
-Make behavior match if count overflows
+Make behavior match std if count overflows
+
+Implement `Pin` or `Unpin` or whatever pointers are supposed to do. (Not hard,
+I just don't use async so haven't bothered yet).
+
+More doc examples.
 
 License: MIT OR Apache-2.0

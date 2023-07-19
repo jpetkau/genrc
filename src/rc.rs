@@ -1,14 +1,16 @@
 //! `genrc::rc::Rc<T>` is very similar to `std::rc::Rc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
-//! See module docs for detailed API, as it's mostly the same as
+//! See [the module docs][crate] for detailed API, as it's mostly the same as
 //! `genrc::arc::Arc<T>`.
 use crate::genrc;
 use std::cell::Cell;
 
+/// Marker type to specify that `Rc` has nonatomic counts
 #[repr(transparent)]
 pub struct Nonatomic(Cell<usize>);
 
+impl genrc::private::Sealed for Nonatomic {}
 unsafe impl genrc::Atomicity for Nonatomic {
     fn new(v: usize) -> Self {
         Nonatomic(Cell::new(v))
@@ -47,10 +49,17 @@ unsafe impl genrc::Atomicity for Nonatomic {
     fn acquire_fence(&self) {}
 }
 
+/// `Rc<T>` with a lifetime parameter, for representing projected pointers
+/// to objects with less-than-static lifetimes.
 pub type Rcl<'a, T> = genrc::Genrc<'a, T, Nonatomic, false>;
+/// `Weak<T>` equivalent for `Rcl`.
 pub type Weakl<'a, T> = genrc::Weak<'a, T, Nonatomic>;
+/// Replacement for [`std::rc::Rc<T>`] that allows shared pointers to subobjects
 pub type Rc<T> = Rcl<'static, T>;
+/// Replacement for [`std::rc::Weak<T>`] that allows shared pointers to subobjects
 pub type Weak<T> = Weakl<'static, T>;
+/// `Rc<T>` that is known to be the unique strong pointer to its referent, so
+/// it can be used mutably until downgrading by calling [`RcBox::shared()`].
 pub type RcBox<'a, T> = genrc::Genrc<'a, T, Nonatomic, true>;
 
 #[cfg(test)]
@@ -101,7 +110,9 @@ mod tests {
     fn test_derived() {
         let mut n = 0;
         {
-            let x = Rcl::new(DropCounter((1, 2), &mut n));
+            let x = Rc::new(DropCounter((1, 2), &mut n));
+            // projecting from a reference with less than 'static
+            // lifetime means we must use `Rcl` instead of `Rc`.
             let y = Rcl::project(x.clone(), |x| &x.0 .0);
             let z = Rcl::project(x.clone(), |x| &x.0 .1);
             assert_eq!(*y, 1);
@@ -198,21 +209,23 @@ mod tests {
         assert!(!Rc::ptr_eq(&a, &b));
         assert!(Rc::ptr_eq(&a, &c));
 
-        // two pointers with the same allocation but different addresses
-        let a = Rc::new([1, 1]);
-        let b = Rc::project(a.clone(), |x| &x[0]);
-        let c = Rc::project(a.clone(), |x| &x[1]);
-        assert!(!Rc::ptr_eq(&b, &c));
+        {
+            // two pointers with the same allocation but different addresses
+            let obj = Rc::new([1, 1]);
+            let p1 = Rc::project(obj.clone(), |x| &x[0]);
+            let p2 = Rc::project(obj.clone(), |x| &x[1]);
+            assert!(Rcl::root_ptr_eq(&p1, &p2));
+            assert!(!Rc::ptr_eq(&p1, &p2));
+        }
 
         {
             // two objects with different allocations but the same address
-            let obj = 1;
-            let p1: Rcl<&i32> = Rcl::new(&obj);
-            let p2: Rcl<i32> = Rcl::project(p1, |x| &**x);
-            let p3 = Rcl::new(&obj);
-            let p4 = Rcl::project(p3, |x| &**x);
-            assert!(Rcl::ptr_eq(&p2, &p4));
-        };
+            let obj = "obj";
+            let p1: Rc<str> = Rc::from_ref(obj);
+            let p2: Rc<str> = Rc::from_ref(obj);
+            assert!(!Rcl::root_ptr_eq(&p1, &p2));
+            assert!(Rcl::ptr_eq(&p1, &p2));
+        }
     }
 
     #[test]
@@ -254,5 +267,23 @@ mod tests {
 
         // now we have a normal Rc to the parent, so we can upgrade child pointers
         assert!(Rcl::ptr_eq(&p.unwrap().upgrade().unwrap(), &root));
+    }
+
+    #[test]
+    fn test_project_mut() {
+        let x: RcBox<[i32; 3]> = RcBox::new([0, 10, 20]);
+        {
+            let mut y = RcBox::project_mut(x, |p| &mut p[1]);
+            assert_eq!(*y, 10);
+            *y = 11;
+        }
+
+        {
+            let mut x = [0, 10, 20];
+            let y = RcBox::new(&mut x);
+            let mut z: RcBox<i32> = RcBox::project_mut(y, |p| &mut p[1]);
+            assert_eq!(*z, 10);
+            *z = 11;
+        };
     }
 }

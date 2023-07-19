@@ -1,7 +1,7 @@
 //! `genrc::rc::Arc<T>` is very similar to `std::sync::Arc<T>`, but with some
 //! capabilities like C++'s `shared_ptr`.
 //!
-//! See module docs for detailed API, as it's mostly the same as
+//! See [the module docs][crate] for detailed API, as it's mostly the same as
 //! `genrc::rc::Rc<T>`.
 use crate::genrc;
 
@@ -10,9 +10,11 @@ use core::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 
+/// Marker type to indicate that `Arc` has atomic counts
 #[repr(transparent)]
 pub struct Atomic(AtomicUsize);
 
+impl genrc::private::Sealed for Atomic {}
 unsafe impl genrc::Atomicity for Atomic {
     fn new(v: usize) -> Self {
         Atomic(AtomicUsize::new(v))
@@ -59,10 +61,18 @@ unsafe impl genrc::Atomicity for Atomic {
     }
 }
 
+/// `Arc<T>` with a lifetime parameter, for representing projected pointers
+/// to objects with less-than-static lifetimes.
 pub type Arcl<'a, T> = genrc::Genrc<'a, T, Atomic, false>;
+/// `Weak<T>` equivalent for `Arcl`.
 pub type Weakl<'a, T> = genrc::Weak<'a, T, Atomic>;
+
+/// Replacement for [`std::sync::Arc<T>`] that allows shared pointers to subobjects
 pub type Arc<T> = Arcl<'static, T>;
+/// Replacement for [`std::sync::Weak<T>`] that allows shared pointers to subobjects
 pub type Weak<T> = Weakl<'static, T>;
+/// `Arc<T>` that is known to be the unique strong pointer to its referent, so
+/// it can be used mutably until downgrading by calling [`ArcBox::shared()`].
 pub type ArcBox<'a, T> = genrc::Genrc<'a, T, Atomic, true>;
 
 #[cfg(test)]
@@ -211,20 +221,18 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &c));
 
         // two pointers with the same allocation but different addresses
-        let a = Arc::new([1, 1]);
-        let b = Arc::project(a.clone(), |x| &x[0]);
-        let c = Arc::project(a.clone(), |x| &x[1]);
-        assert!(!Arc::ptr_eq(&b, &c));
-        assert!(Arcl::root_ptr_eq(&b, &c));
+        let obj = Arc::new([1, 1]);
+        let p1 = Arc::project(obj.clone(), |x| &x[0]);
+        let p2 = Arc::project(obj.clone(), |x| &x[1]);
+        assert!(Arcl::root_ptr_eq(&p1, &p2));
+        assert!(!Arc::ptr_eq(&p1, &p2));
 
         // two objects with different allocations but the same address
         let obj = 1;
-        let p1 = Arcl::new(&obj);
-        let p1 = Arcl::project(p1, |x| &**x);
-        let p2 = Arcl::new(&obj);
-        let p2 = Arcl::project(p2, |x| &**x);
-        assert!(Arcl::ptr_eq(&p1, &p2));
+        let p1 = Arcl::from_ref(&obj);
+        let p2 = Arcl::from_ref(&obj);
         assert!(!Arcl::root_ptr_eq(&p1, &p2));
+        assert!(Arcl::ptr_eq(&p1, &p2));
     }
 
     #[test]
