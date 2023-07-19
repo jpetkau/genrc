@@ -266,6 +266,12 @@ I just don't use async so haven't bothered yet).
 
 More doc examples.
 */
+#![no_std]
+#[cfg(test)]
+extern crate std;
+
+extern crate alloc;
+
 pub mod arc;
 pub mod genrc;
 pub mod rc;

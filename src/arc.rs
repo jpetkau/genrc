@@ -77,6 +77,8 @@ pub type ArcBox<'a, T> = genrc::Genrc<'a, T, Atomic, true>;
 
 #[cfg(test)]
 mod tests {
+    use alloc::{boxed::Box, format, vec, vec::Vec};
+
     use super::*;
 
     fn counts<T>(x: &Arcl<T>) -> (usize, usize) {

@@ -9,9 +9,9 @@
 //! threads.
 //!
 //! `genrc::rc::Rc<T>` in this crate is nonatomic version for single-threaded use.
-use core::borrow;
-use std::{
-    cmp, fmt,
+use alloc::boxed::Box;
+use core::{
+    borrow, cmp, fmt,
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},

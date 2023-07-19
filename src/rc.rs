@@ -4,7 +4,7 @@
 //! See [the module docs][crate] for detailed API, as it's mostly the same as
 //! `genrc::arc::Arc<T>`.
 use crate::genrc;
-use std::cell::Cell;
+use core::cell::Cell;
 
 /// Marker type to specify that `Rc` has nonatomic counts
 #[repr(transparent)]
@@ -65,6 +65,7 @@ pub type RcBox<'a, T> = genrc::Genrc<'a, T, Nonatomic, true>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{boxed::Box, format, vec, vec::Vec};
 
     fn counts<T>(x: &Rcl<T>) -> (usize, usize) {
         (Rcl::strong_count(x), Rcl::weak_count(x))
