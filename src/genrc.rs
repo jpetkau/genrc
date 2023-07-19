@@ -18,6 +18,19 @@ use core::{
     ptr::{self, NonNull},
 };
 
+#[cfg(feature = "allocator_api")]
+use {core::alloc::Allocator, alloc::alloc::Global};
+
+#[cfg(not(feature = "allocator_api"))]
+mod dummy_alloc {
+    #[derive(Clone)]
+    pub (crate) struct Global;
+    pub (crate) trait Allocator {}
+    impl Allocator for Global {}
+}
+#[cfg(not(feature = "allocator_api"))]
+use dummy_alloc::*;
+
 /// Trait to distinguish [`Rc<T>`][crate::Rc] from [`Arc<T>`][crate::Arc]. The
 /// only implementers are [`Atomic`][crate::Atomic] and [`Nonatomic`][crate::Nonatomic].
 ///
@@ -49,8 +62,9 @@ struct Header<C> {
 }
 
 #[repr(C)]
-struct Alloc<T, C> {
+struct Alloc<T, C, A> {
     header: Header<C>,
+    alloc: MaybeUninit<A>,
     value: MaybeUninit<T>,
 }
 
@@ -86,9 +100,10 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
             header: Header {
                 strong: C::new(initial_strong_count),
                 weak: C::new(1),
-                drop_header: drop_header::<T, C>,
-                drop_value: drop_value::<T, C>,
+                drop_header: drop_header::<T, C, Global>,
+                drop_value: drop_value::<T, C, Global>,
             },
+            alloc: MaybeUninit::new(Global),
             value: MaybeUninit::new(value),
         }));
         let h = b as *mut Header<C>;
@@ -120,9 +135,10 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
             header: Header {
                 strong: C::new(0),
                 weak: C::new(1),
-                drop_header: drop_header::<T, C>,
-                drop_value: drop_value::<T, C>,
+                drop_header: drop_header::<T, C, Global>,
+                drop_value: drop_value::<T, C, Global>,
             },
+            alloc: MaybeUninit::new(Global),
             value: MaybeUninit::uninit(),
         }));
         let weak = Weak {
@@ -149,17 +165,64 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         mem::forget(weak);
         strong
     }
+
+    #[cfg(feature = "allocator_api")]
+    pub fn new_in<A: Allocator>(value: T, alloc: A) -> Self
+    where
+        A: Clone + 'a,
+    {
+        let initial_strong_count = if UNIQ { 0 } else { 1 };
+        let b = Box::into_raw(Box::new_in(
+            Alloc {
+                header: Header {
+                    strong: C::new(initial_strong_count),
+                    weak: C::new(1),
+                    drop_header: drop_header::<T, C, A>,
+                    drop_value: drop_value::<T, C, A>,
+                },
+                alloc: MaybeUninit::new(alloc.clone()),
+                value: MaybeUninit::new(value),
+            },
+            alloc,
+        ));
+
+        let h = b as *mut Header<C>;
+        let v = unsafe { ptr::addr_of!((*b).value) as *mut T };
+        Genrc {
+            header: unsafe { ptr::NonNull::new_unchecked(h) },
+            ptr: unsafe { ptr::NonNull::new_unchecked(v) },
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
+    #[cfg(not(feature = "allocator_api"))]
     pub fn from_box(value: Box<T>) -> Self
     where
         T: 'a,
     {
         Genrc::project(Genrc::<Box<T>, C>::new(value), |x| &**x)
+    }
+
+    /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
+    /// the original box allocation rather than copying it. However it still has
+    /// to do a small allocation for the header with the reference counts.
+    ///
+    /// If the box uses a custom allocator, the same allocator will be used for
+    /// the Rc. If that isn't the desired behavior, you can call `Rc::new` or
+    /// `new_in` to specify the allocator you want, and then `project` to hide
+    /// the box.
+    #[cfg(feature = "allocator_api")]
+    pub fn from_box<A>(value: Box<T, A>) -> Self
+    where
+        A: Allocator + Clone + 'a,
+    {
+        let alloc = Box::allocator(&value).clone();
+        Genrc::project(Genrc::<Box<T, A>, C>::new_in(value, alloc), |x| &**x)
     }
 
     /// Constructs a new `Genrc<T, ...>` from a reference without copying.
@@ -616,12 +679,19 @@ impl<'a, T: ?Sized + fmt::Debug, C: Atomicity> fmt::Debug for Weak<'a, T, C> {
     }
 }
 
-unsafe fn drop_header<T, C: Atomicity>(ptr: *mut Header<C>) {
-    let _ = Box::from_raw(ptr as *mut Alloc<T, C>);
+unsafe fn drop_header<T, C, A: Allocator>(ptr: *mut Header<C>) {
+    let ptr = ptr as *mut Alloc<T, C, A>;
+    #[cfg(not(feature = "allocator_api"))]
+    let _ = Box::from_raw(ptr);
+    #[cfg(feature = "allocator_api")]
+    {
+        let alloc = (&mut *ptr).alloc.assume_init_read();
+        let _ = Box::from_raw_in(ptr as *mut Alloc<T, C, A>, alloc);
+    }
 }
 
-unsafe fn drop_value<T, C: Atomicity>(ptr: *mut Header<C>) {
-    let bptr = ptr as *mut Alloc<T, C>;
+unsafe fn drop_value<T, C, A>(ptr: *mut Header<C>) {
+    let bptr = ptr as *mut Alloc<T, C, A>;
     let bref = &mut *bptr;
     bref.value.assume_init_drop();
 }

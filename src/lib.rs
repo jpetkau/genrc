@@ -267,6 +267,8 @@ I just don't use async so haven't bothered yet).
 More doc examples.
 */
 #![no_std]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
 #[cfg(test)]
 extern crate std;
 
