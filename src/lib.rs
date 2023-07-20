@@ -261,15 +261,12 @@ smart ptrs.)
 
 Make behavior match std if count overflows
 
-Implement `Pin` or `Unpin` or whatever pointers are supposed to do. (Not hard,
-I just don't use async so haven't bothered yet).
-
 More doc examples.
 */
 #![no_std]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
-#[cfg(test)]
+#[cfg(any(doc, test))]
 extern crate std;
 
 extern crate alloc;

@@ -15,17 +15,18 @@ use core::{
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
+    pin::Pin,
     ptr::{self, NonNull},
 };
 
 #[cfg(feature = "allocator_api")]
-use {core::alloc::Allocator, alloc::alloc::Global};
+use {alloc::alloc::Global, core::alloc::Allocator};
 
 #[cfg(not(feature = "allocator_api"))]
 mod dummy_alloc {
     #[derive(Clone)]
-    pub (crate) struct Global;
-    pub (crate) trait Allocator {}
+    pub(crate) struct Global;
+    pub(crate) trait Allocator {}
     impl Allocator for Global {}
 }
 #[cfg(not(feature = "allocator_api"))]
@@ -167,9 +168,9 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     }
 
     #[cfg(feature = "allocator_api")]
-    pub fn new_in<A: Allocator>(value: T, alloc: A) -> Self
+    pub fn new_in<A>(value: T, alloc: A) -> Self
     where
-        A: Clone + 'a,
+        A: Allocator + Clone + 'a,
     {
         let initial_strong_count = if UNIQ { 0 } else { 1 };
         let b = Box::into_raw(Box::new_in(
@@ -193,6 +194,14 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
             ptr: unsafe { ptr::NonNull::new_unchecked(v) },
             phantom: PhantomData,
         }
+    }
+
+    /// Constructs a new `Pin<Rc<T>>`. If `T` does not implement `Unpin`, then
+    /// `value` will be pinned in memory and unable to be moved.
+    #[cfg(not(no_global_oom_handling))]
+    pub fn pin(value: T) -> Pin<Self> {
+        let rc: Self = Self::new(value);
+        unsafe { Pin::new_unchecked(rc) }
     }
 }
 
@@ -482,21 +491,19 @@ impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> AsRef<T> for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> AsRef<T> for Genrc<'a, T, C, UNIQ> {
     fn as_ref(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> borrow::Borrow<T>
-    for Genrc<'a, T, C, UNIQ>
-{
+impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> borrow::Borrow<T> for Genrc<'a, T, C, UNIQ> {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity> Clone for Genrc<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity> Clone for Genrc<'a, T, C> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.strong.inc_relaxed();
@@ -520,13 +527,13 @@ impl<'a, T: ?Sized, C: Atomicity> Clone for Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: Default + 'a, C: Atomicity, const UNIQ: bool> Default for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: Default, C: Atomicity, const UNIQ: bool> Default for Genrc<'a, T, C, UNIQ> {
     fn default() -> Self {
         Genrc::new(T::default())
     }
 }
 
-impl<'a, T: ?Sized + 'a, C: Atomicity, const UNIQ: bool> Deref for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Deref for Genrc<'a, T, C, UNIQ> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -603,7 +610,7 @@ impl<'a, T: 'a, C: Atomicity> From<Genrc<'a, T, C, true>> for Genrc<'a, T, C, fa
     }
 }
 
-impl<'a, T: ?Sized + PartialEq + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
+impl<'a, T: ?Sized + PartialEq, C: Atomicity, const Q1: bool, const Q2: bool>
     PartialEq<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
 {
     #[inline]
@@ -619,7 +626,7 @@ impl<'a, T: ?Sized + PartialEq + 'a, C: Atomicity, const Q1: bool, const Q2: boo
     }
 }
 
-impl<'a, T: ?Sized + PartialOrd + 'a, C: Atomicity, const Q1: bool, const Q2: bool>
+impl<'a, T: ?Sized + PartialOrd, C: Atomicity, const Q1: bool, const Q2: bool>
     PartialOrd<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
 {
     fn partial_cmp(&self, other: &Genrc<T, C, Q2>) -> Option<cmp::Ordering> {

@@ -262,9 +262,6 @@ smart ptrs.)
 
 Make behavior match std if count overflows
 
-Implement `Pin` or `Unpin` or whatever pointers are supposed to do. (Not hard,
-I just don't use async so haven't bothered yet).
-
 More doc examples.
 
 License: MIT OR Apache-2.0
