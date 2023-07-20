@@ -37,6 +37,9 @@ use dummy_alloc::*;
 ///
 /// It is `pub` so you can write code that's generic over atomicity, but there's
 /// no reason to implement it for any other types.
+///
+/// # Safety
+/// Trait is private.
 pub unsafe trait Atomicity: private::Sealed {
     #[doc(hidden)]
     fn new(v: usize) -> Self;
@@ -454,7 +457,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
 }
 
 impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
-    pub fn upgrade(self: &Self) -> Option<Genrc<'a, T, C>> {
+    pub fn upgrade(&self) -> Option<Genrc<'a, T, C>> {
         let h = self.header();
         if h.strong.inc_if_nonzero() {
             Some(Genrc {
@@ -493,13 +496,13 @@ impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
 
 impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> AsRef<T> for Genrc<'a, T, C, UNIQ> {
     fn as_ref(&self) -> &T {
-        &**self
+        self
     }
 }
 
 impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> borrow::Borrow<T> for Genrc<'a, T, C, UNIQ> {
     fn borrow(&self) -> &T {
-        &**self
+        self
     }
 }
 
@@ -555,10 +558,8 @@ impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Genrc<'a, T, C, true> {
 impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNIQ> {
     fn drop(&mut self) {
         let h = self.header();
-        if !UNIQ {
-            if h.strong.dec() != 1 {
-                return;
-            }
+        if !UNIQ && h.strong.dec() != 1 {
+            return;
         }
         // last strong pointer was just dropped
         h.strong.acquire_fence();
@@ -619,11 +620,6 @@ impl<'a, T: ?Sized + PartialEq, C: Atomicity, const Q1: bool, const Q2: bool>
         // comparisons in the face of float idiocy.
         *(*self) == *(*other)
     }
-
-    #[inline]
-    fn ne(&self, other: &Genrc<T, C, Q2>) -> bool {
-        *(*self) != *(*other)
-    }
 }
 
 impl<'a, T: ?Sized + PartialOrd, C: Atomicity, const Q1: bool, const Q2: bool>
@@ -652,7 +648,7 @@ impl<'a, T: ?Sized + PartialOrd, C: Atomicity, const Q1: bool, const Q2: bool>
 
 impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, const UNIQ: bool> cmp::Ord for Genrc<'a, T, C, UNIQ> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        (&**self).cmp(&**other)
+        (**self).cmp(&**other)
     }
 }
 
