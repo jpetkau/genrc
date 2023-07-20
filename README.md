@@ -1,6 +1,9 @@
 # genrc
 
-This crate provides alternatives to [`std::sync::Arc`] and [`std::rc::Rc`] which
+[![Crates.io](https://img.shields.io/crates/v/genrc.svg)](https://crates.io/crates/genrc)
+![MIT/Apache](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)
+
+This crate provides alternatives to `std::sync::Arc` and `std::rc::Rc` which
 are (almost) drop-in replacements, but allow refcounted pointers to subobjects,
 like C++'s [`shared_ptr`](https://en.cppreference.com/w/cpp/memory/shared_ptr).
 
@@ -20,8 +23,8 @@ The main feature, which adds a surprising amount of flexibility: if you have an
     let c: Rc<i32> = Rc::project(b, |x| &x[1]);
 ```
 
-There are also types [`RcBox<T>`] (and [`ArcBox<T>`]) that are returned from
-[`new_unique()`][Rc::new_unique], which take advantage of the fact that a newly
+There are also types `RcBox<T>` (and `ArcBox<T>`) that are returned from
+`new_unique()`, which take advantage of the fact that a newly
 created refcounted pointer is still unique, so can be used mutably.
 
 
@@ -35,8 +38,8 @@ is initialized, you can use `project` to convert it to a plain `Rc<T>`:
 
 ```rust
     # use genrc::rc::{Rc, RcBox, Weak};
+
     // construct the object initially uninitialized
-    // we could use `Rc::get_mut` instead of `RcBox` here.
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
 
     // ... later ...
@@ -50,8 +53,7 @@ is initialized, you can use `project` to convert it to a plain `Rc<T>`:
 ```
 
 You can also create cyclic data structures without needing
-[`RefCell`][std::cell::RefCell] or [`new_cyclic`][std::rc::Rc::new_cyclic]:
-
+`RefCell` or `new_cyclic`:
 
 ```rust
     use genrc::rc::{Rc, RcBox, Weak};
@@ -106,12 +108,12 @@ So you can use `Rc` to keep track of possibly-owned, possibly-static data,
 similar to `Cow`.
 
 
-## Notes
+## Other stuff
 
-## Lifetime stuff
+## Lifetimes
 
-`std::rc::Rc` allows you to create an `Rc` pointing to a local variable.
-E.g. this is legal:
+Somewhat surprisingly,`std::rc::Rc` allows you to create an `Rc` pointing to
+a local variable. E.g. this is legal:
 
 ```rust
     use std::{cell::Cell, rc::Rc};
@@ -124,14 +126,15 @@ E.g. this is legal:
 The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
 referent, so the `Rc` can't outlive the referent.
 
-But `project()` lets you turn `genrc::Rc<&'a T>` into an `Rc<T>` pointing to the
-same object. The latter type has nowhere for the lifetime `'a` to go, so if
-allowed this would let the reference live too long and be a soundness bug.
+`genrc::Rc` allows this too. But what if you use `project()` to turn
+`Rc<&'a T>` into an `Rc<T>` pointing to the same object? The latter type has
+nowhere for the lifetime `'a` to go, so if allowed this would let the reference
+live too long and be a soundness bug.
 
-To avoid this, the type [`Rcl`] adds a lifetime parameter to `Rc`.
+To avoid this, the type `Rcl<'a, T>` adds a lifetime parameter to `Rc`.
 
-(In fact [`Rc<T>`] is just an alias for `Rcl<'static, T>`, and [`Arc<T>`] is an
-alias for `Arcl<'static, T>`. And all of them are aliases for [`genrc::Genrc`],
+(In fact `Rc<T>` is just an alias for `Rcl<'static, T>`, and `Arc<T>` is an
+alias for `Arcl<'static, T>`. And all of them are aliases for `genrc::Genrc`,
 which is generic over lifetime, referent type, uniqueness, and atomicity.)
 
 To use `project()` such on a short-lived reference, you must use
@@ -151,6 +154,24 @@ To use `project()` such on a short-lived reference, you must use
     let word : Rcl<[u8]> = Rcl::project(buf, |x| &x[4..10]);
     assert!(std::ptr::eq(&*word, &bigdata[4..10]));
 ```
+
+Since the lifetime is usually inferred, in most cases `Rcl` works exactly like
+`Rc`. The main exception is in data types, where you may need it to explicitly
+specify a lifetime. E.g. if you want a field that's an `Rc<str>` where the
+string might be short-lived, you could write:
+
+```rust
+    use genrc::rc::Rcl;
+
+    // Token in a parser where the buffer is an `Rc<str>`, and `text` can point
+    // directly into the buffer. (Or `text` can point to owned data, e.g. for
+    // unescaped strings, and callers generally don't have to care.)
+    struct Token<'a> {
+      some_data: u32,
+      text: Rcl<'a, str>
+    }
+```
+
 
 ### Differences from `std::sync::Arc` and `std::rc::Rc`
 
@@ -264,4 +285,7 @@ Make behavior match std if count overflows
 
 More doc examples.
 
-License: MIT OR Apache-2.0
+## License
+
+genrc is licensed under either the MIT or Apache 2.0 license, whichever you
+prefer.

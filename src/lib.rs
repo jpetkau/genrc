@@ -8,7 +8,7 @@ The main feature, which adds a surprising amount of flexibility: if you have an
 `Rc<U>` that shares ownership with the original object by calling
 `Rc::project()`.
 
-```rust
+```
     use genrc::rc::{Rc, Weak};
     let a: Rc<[i32; 3]> = Rc::new([1, 2, 3]);
 
@@ -34,8 +34,8 @@ is initialized, you can use `project` to convert it to a plain `Rc<T>`:
 
 ```
     # use genrc::rc::{Rc, RcBox, Weak};
+
     // construct the object initially uninitialized
-    // we could use `Rc::get_mut` instead of `RcBox` here.
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
 
     // ... later ...
@@ -50,7 +50,6 @@ is initialized, you can use `project` to convert it to a plain `Rc<T>`:
 
 You can also create cyclic data structures without needing
 [`RefCell`][std::cell::RefCell] or [`new_cyclic`][std::rc::Rc::new_cyclic]:
-
 
 ```
     use genrc::rc::{Rc, RcBox, Weak};
@@ -105,12 +104,12 @@ So you can use `Rc` to keep track of possibly-owned, possibly-static data,
 similar to `Cow`.
 
 
-# Notes
+# Other stuff
 
-# Lifetime stuff
+# Lifetimes
 
-`std::rc::Rc` allows you to create an `Rc` pointing to a local variable.
-E.g. this is legal:
+Somewhat surprisingly,`std::rc::Rc` allows you to create an `Rc` pointing to
+a local variable. E.g. this is legal:
 
 ```
     use std::{cell::Cell, rc::Rc};
@@ -123,11 +122,12 @@ E.g. this is legal:
 The type of such an `Rc` is `Rc<&'a T>`, where `'a` is the lifetime of the
 referent, so the `Rc` can't outlive the referent.
 
-But `project()` lets you turn `genrc::Rc<&'a T>` into an `Rc<T>` pointing to the
-same object. The latter type has nowhere for the lifetime `'a` to go, so if
-allowed this would let the reference live too long and be a soundness bug.
+[`genrc::Rc`][Rc] allows this too. But what if you use `project()` to turn
+`Rc<&'a T>` into an `Rc<T>` pointing to the same object? The latter type has
+nowhere for the lifetime `'a` to go, so if allowed this would let the reference
+live too long and be a soundness bug.
 
-To avoid this, the type [`Rcl`] adds a lifetime parameter to `Rc`.
+To avoid this, the type [`Rcl<'a, T>`][Rcl] adds a lifetime parameter to `Rc`.
 
 (In fact [`Rc<T>`] is just an alias for `Rcl<'static, T>`, and [`Arc<T>`] is an
 alias for `Arcl<'static, T>`. And all of them are aliases for [`genrc::Genrc`],
@@ -150,6 +150,24 @@ To use `project()` such on a short-lived reference, you must use
     let word : Rcl<[u8]> = Rcl::project(buf, |x| &x[4..10]);
     assert!(std::ptr::eq(&*word, &bigdata[4..10]));
 ```
+
+Since the lifetime is usually inferred, in most cases `Rcl` works exactly like
+`Rc`. The main exception is in data types, where you may need it to explicitly
+specify a lifetime. E.g. if you want a field that's an `Rc<str>` where the
+string might be short-lived, you could write:
+
+```
+    use genrc::rc::Rcl;
+
+    // Token in a parser where the buffer is an `Rc<str>`, and `text` can point
+    // directly into the buffer. (Or `text` can point to owned data, e.g. for
+    // unescaped strings, and callers generally don't have to care.)
+    struct Token<'a> {
+      some_data: u32,
+      text: Rcl<'a, str>
+    }
+```
+
 
 ## Differences from `std::sync::Arc` and `std::rc::Rc`
 
