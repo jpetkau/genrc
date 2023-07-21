@@ -201,7 +201,6 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
 
     /// Constructs a new `Pin<Rc<T>>`. If `T` does not implement `Unpin`, then
     /// `value` will be pinned in memory and unable to be moved.
-    #[cfg(not(no_global_oom_handling))]
     pub fn pin(value: T) -> Pin<Self> {
         let rc: Self = Self::new(value);
         unsafe { Pin::new_unchecked(rc) }

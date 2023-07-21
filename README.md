@@ -172,8 +172,27 @@ string might be short-lived, you could write:
     }
 ```
 
+The lifetime parameter is also needed when using a custom allocator that has
+a lifetime, since `Rc<T>` also hides the allocator.
 
-### Differences from `std::sync::Arc` and `std::rc::Rc`
+
+### Custom allocators
+
+Since the underlying allocation is type-erased, `Rc` can support custom
+allocators (via the currently unstable `allocator_api`) without affecting
+the signature of `Rc`-using code. That is, you specify a custom allocator by
+calling `Rc::new_in()`, but the returned type is just `Rc<T>` (or
+`Rcl<'a, T>` if the allocator has a non-static lifetime) so most code that
+works with it doesn't need to care about the allocator.
+
+While this can be useful, often you might prefer to keep track of the allocator
+type explicitly, e.g. so that code receiving an `Rc` can use the same allocator
+for new allocations. A future version will probably update this library to allow
+such usage, since you'll still be able to `project()` away the allocator to
+recover the current behavior.
+
+
+### Other differences from `std::sync::Arc` and `std::rc::Rc`
 
 `Rc::from_box` does not copy the object from the original box. Instead it
 takes ownership of the box as-is, with the counts in a separate allocation.
