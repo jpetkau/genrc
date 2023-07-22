@@ -9,7 +9,10 @@ categories = ["algorithms", "rust-patterns"]
 keywords = ["arc", "rc", "shared_ptr", "projected", "zerocopy"]
 
 [features]
-allocator_api = []
+allocator_api = ["bumpalo/allocator_api"]
+
+[dev-dependencies]
+bumpalo = { version = "3.13" }
 
 [package.metadata.docs.rs]
 all-features = true

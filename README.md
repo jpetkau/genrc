@@ -110,7 +110,17 @@ similar to `Cow`.
 
 ## Other stuff
 
-## Lifetimes
+### Nightly Rust `allocator_api` Support
+
+The `allocator_api` feature enables the unstable allocator API, allowing
+`Rc` and `Arc` to use custom allocators.
+
+`Rc::new_in` returns an `Rc<T, A>`, with the allocator as part of the type.
+You can use `Rc::erase_allocator()` to hide the allocator from the type when
+that is desirable.
+
+
+### Lifetimes
 
 Somewhat surprisingly,`std::rc::Rc` allows you to create an `Rc` pointing to
 a local variable. E.g. this is legal:
@@ -135,7 +145,8 @@ To avoid this, the type `Rcl<'a, T>` adds a lifetime parameter to `Rc`.
 
 (In fact `Rc<T>` is just an alias for `Rcl<'static, T>`, and `Arc<T>` is an
 alias for `Arcl<'static, T>`. And all of them are aliases for `genrc::Genrc`,
-which is generic over lifetime, referent type, uniqueness, and atomicity.)
+which is generic over lifetime, referent type, atomicity, allocator, and
+uniqueness.)
 
 To use `project()` such on a short-lived reference, you must use
 `Rcl::project()`, which returns an `Rcl` with a non-static lifetime.
@@ -172,24 +183,8 @@ string might be short-lived, you could write:
     }
 ```
 
-The lifetime parameter is also needed when using a custom allocator that has
-a lifetime, since `Rc<T>` also hides the allocator.
-
-
-### Custom allocators
-
-Since the underlying allocation is type-erased, `Rc` can support custom
-allocators (via the currently unstable `allocator_api`) without affecting
-the signature of `Rc`-using code. That is, you specify a custom allocator by
-calling `Rc::new_in()`, but the returned type is just `Rc<T>` (or
-`Rcl<'a, T>` if the allocator has a non-static lifetime) so most code that
-works with it doesn't need to care about the allocator.
-
-While this can be useful, often you might prefer to keep track of the allocator
-type explicitly, e.g. so that code receiving an `Rc` can use the same allocator
-for new allocations. A future version will probably update this library to allow
-such usage, since you'll still be able to `project()` away the allocator to
-recover the current behavior.
+The lifetime parameter is also needed when type-erasing a custom allocator that
+has a lifetime, since `Rc<T>` also hides the allocator.
 
 
 ### Other differences from `std::sync::Arc` and `std::rc::Rc`
@@ -206,14 +201,12 @@ that requires some unstable traits. However you can do the conversion explicitly
 with `Rc::project`. [TODO: support this behind a nightly-requiring feature.]
 
 The std pointers have various `MaybeUninit`-related methods for initializing
-objects after allocation. That API isn't possible in Genrc, because the initial
-object is type-erased. However, `project` allows you to do the same thing
-entirely safely with `Option`:
+objects after allocation. That API isn't provided in Genrc, because you can
+accomplish the same thing entirely in safe code using `Option` and `project`:
 
 ```rust
     # use genrc::rc::{Rc, RcBox, Weak};
-    // construct the object initially uninitialized
-    // we could use `Rc::get_mut` instead of `RcBox` here.
+    // construct the object uninitialized
     let mut obj : RcBox<Option<i32>> = Rc::new_unique(None);
 
     // ... later ...
@@ -293,14 +286,14 @@ a wrapper type that implements `DerefMut`. This crate copies that API.
 
 ### Todo
 
-Allocator support. (Important, because unlike `std::Rc` this allows erasing the
-allocator so interoperability
-
 Implement the various Unsize traits behind a feature. (They require nightly even
 though they've been unchanged since 1.0, and are required to fully implement
 smart ptrs.)
 
 Make behavior match std if count overflows
+
+Richer custom allocator APIs. Currently only `new_in` and `from_box` are
+provided; should have `try_*` and support `no_global_oom_handling`.
 
 More doc examples.
 

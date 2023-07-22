@@ -3,15 +3,15 @@
 //!
 //! See [the module docs][crate] for detailed API, as it's mostly the same as
 //! `genrc::arc::Arc<T>`.
-use crate::genrc;
+use crate::genrc::{self, private, Atomicity, Genrc, Global};
 use core::cell::Cell;
 
 /// Marker type to specify that `Rc` has nonatomic counts
 #[repr(transparent)]
 pub struct Nonatomic(Cell<usize>);
 
-impl genrc::private::Sealed for Nonatomic {}
-unsafe impl genrc::Atomicity for Nonatomic {
+impl private::Sealed for Nonatomic {}
+unsafe impl Atomicity for Nonatomic {
     fn new(v: usize) -> Self {
         Nonatomic(Cell::new(v))
     }
@@ -51,16 +51,16 @@ unsafe impl genrc::Atomicity for Nonatomic {
 
 /// `Rc<T>` with a lifetime parameter, for representing projected pointers
 /// to objects with less-than-static lifetimes.
-pub type Rcl<'a, T> = genrc::Genrc<'a, T, Nonatomic, false>;
+pub type Rcl<'a, T, A = Global> = Genrc<'a, T, Nonatomic, A, false>;
 /// `Weak<T>` equivalent for `Rcl`.
-pub type Weakl<'a, T> = genrc::Weak<'a, T, Nonatomic>;
+pub type Weakl<'a, T, A = Global> = genrc::Weak<'a, T, Nonatomic, A>;
 /// Replacement for [`std::rc::Rc<T>`] that allows shared pointers to subobjects
-pub type Rc<T> = Rcl<'static, T>;
+pub type Rc<T, A = Global> = Rcl<'static, T, A>;
 /// Replacement for [`std::rc::Weak<T>`] that allows shared pointers to subobjects
-pub type Weak<T> = Weakl<'static, T>;
+pub type Weak<T, A = Global> = Weakl<'static, T, A>;
 /// `Rc<T>` that is known to be the unique strong pointer to its referent, so
 /// it can be used mutably until downgrading by calling [`RcBox::shared()`].
-pub type RcBox<'a, T> = genrc::Genrc<'a, T, Nonatomic, true>;
+pub type RcBox<'a, T, A = Global> = Genrc<'a, T, Nonatomic, A, true>;
 
 #[cfg(test)]
 mod tests {
@@ -286,5 +286,32 @@ mod tests {
             assert_eq!(*z, 10);
             *z = 11;
         };
+    }
+}
+
+#[cfg(feature = "allocator_api")]
+#[cfg(test)]
+mod alloc_tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_alloc() {
+        use bumpalo::Bump;
+        let bump = Bump::new();
+        let alloc = &bump;
+
+        // Create an Rc using a bump allocator
+        let p1: Rc<i32, &Bump> = Rc::new_in(17, alloc);
+        assert!(std::ptr::eq(*Rc::allocator(&p1), alloc));
+
+        // We can hide the bump-ness of it. But since `bump` is a local variable
+        // we need to use `Rcl` to give the lifetime a place to go.
+
+        //error[E0597]: `bump` does not live long enough
+        // let p1 : Rc<i32> = Rc::erase_allocator(p1);
+
+        let p2: Rcl<i32> = Rc::erase_allocator(p1.clone());
+        assert!(Rcl::ptr_eq(&p1, &p2));
+        assert!(Rcl::root_ptr_eq(&p1, &p2));
     }
 }

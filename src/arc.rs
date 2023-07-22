@@ -3,7 +3,7 @@
 //!
 //! See [the module docs][crate] for detailed API, as it's mostly the same as
 //! `genrc::rc::Rc<T>`.
-use crate::genrc;
+use crate::genrc::{self, private, Atomicity, Genrc, Global};
 
 use core::sync::atomic::{
     AtomicUsize,
@@ -14,8 +14,8 @@ use core::sync::atomic::{
 #[repr(transparent)]
 pub struct Atomic(AtomicUsize);
 
-impl genrc::private::Sealed for Atomic {}
-unsafe impl genrc::Atomicity for Atomic {
+impl private::Sealed for Atomic {}
+unsafe impl Atomicity for Atomic {
     fn new(v: usize) -> Self {
         Atomic(AtomicUsize::new(v))
     }
@@ -63,17 +63,17 @@ unsafe impl genrc::Atomicity for Atomic {
 
 /// `Arc<T>` with a lifetime parameter, for representing projected pointers
 /// to objects with less-than-static lifetimes.
-pub type Arcl<'a, T> = genrc::Genrc<'a, T, Atomic, false>;
+pub type Arcl<'a, T, A = Global> = Genrc<'a, T, Atomic, A, false>;
 /// `Weak<T>` equivalent for `Arcl`.
-pub type Weakl<'a, T> = genrc::Weak<'a, T, Atomic>;
+pub type Weakl<'a, T, A = Global> = genrc::Weak<'a, T, Atomic, A>;
 
 /// Replacement for [`std::sync::Arc<T>`] that allows shared pointers to subobjects
-pub type Arc<T> = Arcl<'static, T>;
+pub type Arc<T, A = Global> = Arcl<'static, T, A>;
 /// Replacement for [`std::sync::Weak<T>`] that allows shared pointers to subobjects
-pub type Weak<T> = Weakl<'static, T>;
+pub type Weak<T, A = Global> = Weakl<'static, T, A>;
 /// `Arc<T>` that is known to be the unique strong pointer to its referent, so
 /// it can be used mutably until downgrading by calling [`ArcBox::shared()`].
-pub type ArcBox<'a, T> = genrc::Genrc<'a, T, Atomic, true>;
+pub type ArcBox<'a, T, A = Global> = genrc::Genrc<'a, T, Atomic, A, true>;
 
 #[cfg(test)]
 mod tests {

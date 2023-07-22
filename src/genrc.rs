@@ -1,7 +1,12 @@
 //! `genrc::Genrc<T, C>` implements `Arc` and `Rc` generically across the count type
 //! (atomic vs. nonatomic).
 //!
-//! See module docs for detailed API
+//! See [module docs][crate] for an overview of the API.
+//!
+//! Note that the documentation for most methods on [`Genrc`] refers to type
+//! aliases like `Rc<T>` instead of the full `Genrc<'static, T, C, A, UNIQ>`
+//! signature, as that is how they're intended to be used in 99% of code. The
+//! full signature is mostly an implementation detail.
 //!
 //! ## See also
 //!
@@ -20,17 +25,17 @@ use core::{
 };
 
 #[cfg(feature = "allocator_api")]
-use {alloc::alloc::Global, core::alloc::Allocator};
+pub(crate) use {alloc::alloc::Global, core::alloc::Allocator};
 
 #[cfg(not(feature = "allocator_api"))]
 mod dummy_alloc {
     #[derive(Clone)]
-    pub(crate) struct Global;
-    pub(crate) trait Allocator {}
+    pub struct Global;
+    pub trait Allocator {}
     impl Allocator for Global {}
 }
 #[cfg(not(feature = "allocator_api"))]
-use dummy_alloc::*;
+pub use dummy_alloc::*;
 
 /// Trait to distinguish [`Rc<T>`][crate::Rc] from [`Arc<T>`][crate::Arc]. The
 /// only implementers are [`Atomic`][crate::Atomic] and [`Nonatomic`][crate::Nonatomic].
@@ -61,12 +66,11 @@ pub unsafe trait Atomicity: private::Sealed {
 struct Header<C> {
     strong: C,
     weak: C,
-    drop_header: unsafe fn(*mut Header<C>),
-    drop_value: unsafe fn(*mut Header<C>),
+    drop_fn: unsafe fn(*mut Header<C>, bool),
 }
 
 #[repr(C)]
-struct Alloc<T, C, A> {
+struct Allocation<T, C, A> {
     header: Header<C>,
     alloc: MaybeUninit<A>,
     value: MaybeUninit<T>,
@@ -74,38 +78,37 @@ struct Alloc<T, C, A> {
 
 /// Generic implementation behind `Rc`, `Rcl`, `RcBox`, `Arc`, `Arcl`,
 /// and `ArcBox`.
-pub struct Genrc<'a, T: ?Sized, C: Atomicity, const UNIQ: bool = false> {
+pub struct Genrc<'a, T: ?Sized, C: Atomicity, A: Allocator = Global, const UNIQ: bool = false> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
-    phantom: PhantomData<(&'a (), T)>,
+    phantom: PhantomData<(&'a (), A, T)>,
 }
 
 /// Generic implementation behind `rc::Weak` and `arc::Weak`, distinguished
 /// by `Atomicity`.
-pub struct Weak<'a, T: ?Sized, C: Atomicity> {
+pub struct Weak<'a, T: ?Sized, C: Atomicity, A: Allocator = Global> {
     header: ptr::NonNull<Header<C>>,
     ptr: ptr::NonNull<T>,
-    phantom: PhantomData<&'a T>,
+    phantom: PhantomData<(&'a (), A, T)>,
 }
 
-impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, Global, UNIQ> {
     /// Constructs a new `GenRc<T>` with the given value.
     ///
     /// The returned pointer is known to be unique, so it
     /// implements [`std::ops::DerefMut`]
-    pub fn new_unique(value: T) -> Genrc<'a, T, C, true> {
-        Genrc::<T, C, true>::new(value)
+    pub fn new_unique(value: T) -> Genrc<'a, T, C, Global, true> {
+        Genrc::<T, C, Global, true>::new(value)
     }
 
     /// Constructs a new `GenRc<T>` with the given value.
     pub fn new(value: T) -> Self {
         let initial_strong_count = if UNIQ { 0 } else { 1 };
-        let b = Box::into_raw(Box::new(Alloc {
+        let b = Box::into_raw(Box::new(Allocation {
             header: Header {
                 strong: C::new(initial_strong_count),
                 weak: C::new(1),
-                drop_header: drop_header::<T, C, Global>,
-                drop_value: drop_value::<T, C, Global>,
+                drop_fn: drop_fn::<T, C, Global>,
             },
             alloc: MaybeUninit::new(Global),
             value: MaybeUninit::new(value),
@@ -127,7 +130,7 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     /// Note that `RcBox<T>` (or `ArcBox<T>`) enable easier construction of
     /// cyclic values; this is here mostly for `std` compatibility.
     /// See the main crate documentation for examples.
-    pub fn new_cyclic<F>(data_fn: F) -> Genrc<'a, T, C>
+    pub fn new_cyclic<F>(data_fn: F) -> Genrc<'a, T, C, Global>
     where
         F: FnOnce(&Weak<'a, T, C>) -> T,
         T: 'a,
@@ -135,12 +138,11 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         // Construct the inner in the "uninitialized" state with a single weak
         // reference. We don't set strong=1 yet so that if `f` panics, we don't
         // try to drop the uninitialized value.
-        let b = Box::into_raw(Box::new(Alloc {
+        let b = Box::into_raw(Box::new(Allocation {
             header: Header {
                 strong: C::new(0),
                 weak: C::new(1),
-                drop_header: drop_header::<T, C, Global>,
-                drop_value: drop_value::<T, C, Global>,
+                drop_fn: drop_fn::<T, C, Global>,
             },
             alloc: MaybeUninit::new(Global),
             value: MaybeUninit::uninit(),
@@ -170,25 +172,63 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         strong
     }
 
-    #[cfg(feature = "allocator_api")]
-    pub fn new_in<A>(value: T, alloc: A) -> Self
+    /// Constructs a new `Pin<Rc<T>>`. If `T` does not implement `Unpin`, then
+    /// `value` will be pinned in memory and unable to be moved.
+    pub fn pin(value: T) -> Pin<Self> {
+        let rc: Self = Self::new(value);
+        unsafe { Pin::new_unchecked(rc) }
+    }
+}
+
+impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, Global, false> {
+    /// Constructs a new `Genrc<T, ...>` from a reference without copying.
+    ///
+    /// ```
+    /// use genrc::Rcl;
+    /// let x = 5;
+    /// let p : Rcl<i32> = Rcl::from_ref(&x);
+    /// assert!(std::ptr::eq(&*p, &x));
+    /// ```
+    pub fn from_ref(value: &'a T) -> Self {
+        Genrc::project(
+            Genrc::<'a, &'a T, C, Global, false>::new(value),
+            Deref::deref,
+        )
+    }
+
+    /// Return an `Rc<T>` for a boxed value. Unlike `std::Rc`, this reuses the
+    /// original box allocation rather than copying it. However it still has to
+    /// do a small allocation for the header with the reference counts.
+    #[cfg(not(feature = "allocator_api"))]
+    pub fn from_box(value: Box<T>) -> Self
     where
-        A: Allocator + Clone + 'a,
+        T: 'a,
+    {
+        Genrc::project(Genrc::<Box<T>, C, Global, false>::new(value), |x| &**x)
+    }
+}
+
+impl<'a, T, C: Atomicity, A: Allocator, const UNIQ: bool> Genrc<'a, T, C, A, UNIQ> {
+    /// Constructs a new `Rc<T, A>` with the given value
+    #[cfg(feature = "allocator_api")]
+    pub fn new_in(value: T, alloc: A) -> Self
+    where
+        A: Allocator,
     {
         let initial_strong_count = if UNIQ { 0 } else { 1 };
-        let b = Box::into_raw(Box::new_in(
-            Alloc {
+        let (b, alloc) = Box::into_raw_with_allocator(Box::new_in(
+            Allocation {
                 header: Header {
                     strong: C::new(initial_strong_count),
                     weak: C::new(1),
-                    drop_header: drop_header::<T, C, A>,
-                    drop_value: drop_value::<T, C, A>,
+                    drop_fn: drop_fn::<T, C, A>,
                 },
-                alloc: MaybeUninit::new(alloc.clone()),
+                alloc: MaybeUninit::uninit(),
                 value: MaybeUninit::new(value),
             },
             alloc,
         ));
+        unsafe { &mut *b }.alloc.write(alloc);
 
         let h = b as *mut Header<C>;
         let v = unsafe { ptr::addr_of!((*b).value) as *mut T };
@@ -199,26 +239,48 @@ impl<'a, T, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         }
     }
 
-    /// Constructs a new `Pin<Rc<T>>`. If `T` does not implement `Unpin`, then
-    /// `value` will be pinned in memory and unable to be moved.
-    pub fn pin(value: T) -> Pin<Self> {
-        let rc: Self = Self::new(value);
-        unsafe { Pin::new_unchecked(rc) }
+    /// Return an `Rc<T, Global>`, erasing whatever allocator type `this` may
+    /// have had before. Calls to `allocator()` on the returned `Rc` will return
+    /// `Global`.
+    ///
+    /// Note that the referent still lives in and will be freed from its
+    /// original allocation; this just hides the allocator from the type
+    /// signature.
+    pub fn erase_allocator<'b>(this: Self) -> Genrc<'b, T, C, Global, UNIQ>
+    where
+        A: 'b,
+        'a: 'b,
+    {
+        let u = Genrc {
+            header: this.header,
+            ptr: this.ptr,
+            phantom: PhantomData,
+        };
+        mem::forget(this); // ownership transferred to `u`
+        u
+    }
+
+    pub fn allocator(this: &Self) -> &A {
+        // Safety:
+        //
+        // If `A` has not been type-erased, then we're transmuting from the
+        // original `Allocation<T, C, A>` to `Allocation<T, C, ()>`. This is
+        // ok because it's repr(C) and T is the last field.
+        //
+        // If `A` *has* been type-erased then we're transmuting to
+        // `Allocation<T, Global, ()>` and conjuring up an `&Global` where
+        // the other object was. This works because `Global` is guaranteed
+        // to be a ZST, so we imagine there was a `Global` before `A` all
+        // along.
+        //
+        // The `MaybeUninit` is safe because it's always initialized; we just
+        // use `MaybeUninit` to avoid a double-drop inside `drop_header`.
+        let ptr = this.header.as_ptr() as *const Allocation<(), C, A>;
+        unsafe { (&*ptr).alloc.assume_init_ref() }
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
-    /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
-    /// the original box allocation rather than copying it. However it still has
-    /// to do a small allocation for the header with the reference counts.
-    #[cfg(not(feature = "allocator_api"))]
-    pub fn from_box(value: Box<T>) -> Self
-    where
-        T: 'a,
-    {
-        Genrc::project(Genrc::<Box<T>, C>::new(value), |x| &**x)
-    }
-
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Genrc<'a, T, C, A> {
     /// Return a `Genrc<T, C>` for a boxed value. Unlike `std::Rc`, this reuses
     /// the original box allocation rather than copying it. However it still has
     /// to do a small allocation for the header with the reference counts.
@@ -228,26 +290,16 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// `new_in` to specify the allocator you want, and then `project` to hide
     /// the box.
     #[cfg(feature = "allocator_api")]
-    pub fn from_box<A>(value: Box<T, A>) -> Self
+    pub fn from_box(value: Box<T, A>) -> Self
     where
-        A: Allocator + Clone + 'a,
+        A: Clone + 'a,
     {
         let alloc = Box::allocator(&value).clone();
-        Genrc::project(Genrc::<Box<T, A>, C>::new_in(value, alloc), |x| &**x)
+        Genrc::project(Genrc::<Box<T, A>, C, A>::new_in(value, alloc), |x| &**x)
     }
+}
 
-    /// Constructs a new `Genrc<T, ...>` from a reference without copying.
-    ///
-    /// ```
-    /// use genrc::Rcl;
-    /// let x = 5;
-    /// let p : Rcl<i32> = Rcl::from_ref(&x);
-    /// assert!(std::ptr::eq(&*p, &x));
-    /// ```
-    pub fn from_ref(value: &'a T) -> Self {
-        Genrc::project(Genrc::<'a, &'a T, C>::new(value), Deref::deref)
-    }
-
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Genrc<'a, T, C, A> {
     /// Convert `Genrc<T>` to `Genrc<U>`, as long as &T converts to &U.
     ///
     /// This should be spelled `from()`, but that conflicts with the blanket
@@ -256,7 +308,7 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// TODO: this doesn't work for slices; there's no blanket impl
     /// `for<'a> &'a [T]: From<&'a [T; N]>` and I don't know why.
     /// So for now you must call `project()` explicitly.
-    pub fn cast<U: ?Sized>(this: Genrc<'a, T, C>) -> Genrc<'a, U, C>
+    pub fn cast<U: ?Sized>(this: Genrc<'a, T, C, A>) -> Genrc<'a, U, C, A>
     where
         T: 'a,
         U: 'a,
@@ -269,25 +321,25 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C> {
     /// this is is not the same as sharing the same allocation: e.g. both might
     /// point to the same static object due to project(), or both might point
     /// to different subobjects of the same root pointer.
-    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+    pub fn ptr_eq<A2: Allocator>(this: &Self, other: &Genrc<T, C, A2>) -> bool {
         this.ptr == other.ptr
     }
 
     /// Returns true if two `Genrc` pointers point to the same allocation, i.e.
     /// they share reference counts. Note that they may point to different
     /// subobjects within that allocation due to `project()`.
-    pub fn root_ptr_eq(this: &Self, other: &Self) -> bool {
+    pub fn root_ptr_eq<T2: ?Sized, A2: Allocator>(this: &Self, other: &Genrc<T2, C, A2>) -> bool {
         this.header == other.header
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Genrc<'a, T, C, A, true> {
     /// Return an `RcBox<U>` for any type U contained within T, e.g. an element
     /// of a slice, or &dyn view of an object.
     pub fn project_mut<'b, U: ?Sized, F: FnOnce(&mut T) -> &mut U>(
         mut s: Self,
         f: F,
-    ) -> Genrc<'b, U, C, true>
+    ) -> Genrc<'b, U, C, A, true>
     where
         T: 'a,
         U: 'b,
@@ -304,23 +356,8 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
         u
     }
 
-    /// Constructs a new `RcBox<T, ...>` from a reference without copying.
-    ///
-    /// ```
-    /// use genrc::RcBox;
-    /// let mut x = 5;
-    /// {
-    ///     let mut p : RcBox<i32> = RcBox::from_mut_ref(&mut x);
-    ///     *p = 6;
-    /// }
-    /// assert_eq!(x, 6);
-    /// ```
-    pub fn from_mut_ref(value: &'a mut T) -> Self {
-        Genrc::project_mut(Genrc::<&'a mut T, C, true>::new(value), DerefMut::deref_mut)
-    }
-
     /// A unique ("Box") pointer can be lowered to a normal shared pointer
-    pub fn shared(this: Genrc<'a, T, C, true>) -> Genrc<'a, T, C, false> {
+    pub fn shared(this: Genrc<'a, T, C, A, true>) -> Genrc<'a, T, C, A, false> {
         // At this point, we may have weak pointers in other threads, so we need
         // to synchronize with them possibly being upgraded to strong pointers.
         // upgrade does an acquire on the strong count, so we need to increment
@@ -339,14 +376,37 @@ impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity> Genrc<'a, T, C, Global, true> {
+    /// Constructs a new `RcBox<T, ...>` from a reference without copying.
+    ///
+    /// ```
+    /// use genrc::RcBox;
+    /// let mut x = 5;
+    /// {
+    ///     let mut p : RcBox<i32> = RcBox::from_mut_ref(&mut x);
+    ///     *p = 6;
+    /// }
+    /// assert_eq!(x, 6);
+    /// ```
+    pub fn from_mut_ref(value: &'a mut T) -> Self {
+        Genrc::project_mut(
+            Genrc::<&'a mut T, C, Global, true>::new(value),
+            DerefMut::deref_mut,
+        )
+    }
+}
+
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> Genrc<'a, T, C, A, UNIQ> {
     /// Return a `Genrc<U>` for any type U contained within T, e.g. an element of
     /// a slice, or &dyn view of an object.
     ///
     /// Calling `project()` on an `RcBox` or `ArcBox` will downgrade it to a
     /// normal `Rc` or `Arc`. Use `project_mut()` if you need to preserve
     /// uniqueness.
-    pub fn project<'u, U: ?Sized, F: FnOnce(&T) -> &U>(this: Self, f: F) -> Genrc<'u, U, C, false> {
+    pub fn project<'u, U: ?Sized, F: FnOnce(&T) -> &U>(
+        this: Self,
+        f: F,
+    ) -> Genrc<'u, U, C, A, false> {
         let ptr = f(this.ptr()).into();
         Self::projected(this, ptr)
     }
@@ -355,7 +415,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     pub fn try_project<'u, U: ?Sized, F: FnOnce(&T) -> Option<&U>>(
         this: Self,
         f: F,
-    ) -> Option<Genrc<'u, U, C, false>> {
+    ) -> Option<Genrc<'u, U, C, A, false>> {
         match f(this.ptr()) {
             None => None,
             Some(u) => {
@@ -365,7 +425,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
         }
     }
 
-    fn projected<'u, U: ?Sized>(this: Self, ptr: NonNull<U>) -> Genrc<'u, U, C, false> {
+    fn projected<'u, U: ?Sized>(this: Self, ptr: NonNull<U>) -> Genrc<'u, U, C, A, false> {
         if UNIQ {
             // original pointer is an RcBox and we're downgrading to Rc
             debug_assert_eq!(this.header().strong.get(), 0);
@@ -382,7 +442,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     }
 
     /// Return a [`Weak`] pointer to this object.
-    pub fn downgrade(this: &Genrc<T, C, UNIQ>) -> Weak<'a, T, C> {
+    pub fn downgrade(this: &Genrc<T, C, A, UNIQ>) -> Weak<'a, T, C, A> {
         let h = this.header();
         h.weak.inc_relaxed();
         Weak {
@@ -455,7 +515,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Genrc<'a, T, C, UNIQ> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Weak<'a, T, C, A> {
     pub fn upgrade(&self) -> Option<Genrc<'a, T, C>> {
         let h = self.header();
         if h.strong.inc_if_nonzero() {
@@ -493,19 +553,23 @@ impl<'a, T: ?Sized, C: Atomicity> Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> AsRef<T> for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> AsRef<T>
+    for Genrc<'a, T, C, A, UNIQ>
+{
     fn as_ref(&self) -> &T {
         self
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> borrow::Borrow<T> for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> borrow::Borrow<T>
+    for Genrc<'a, T, C, A, UNIQ>
+{
     fn borrow(&self) -> &T {
         self
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Clone for Genrc<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Clone for Genrc<'a, T, C, A> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.strong.inc_relaxed();
@@ -517,7 +581,7 @@ impl<'a, T: ?Sized, C: Atomicity> Clone for Genrc<'a, T, C> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Clone for Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Clone for Weak<'a, T, C, A> {
     fn clone(&self) -> Self {
         let h = self.header();
         h.weak.inc_relaxed();
@@ -529,13 +593,15 @@ impl<'a, T: ?Sized, C: Atomicity> Clone for Weak<'a, T, C> {
     }
 }
 
-impl<'a, T: Default, C: Atomicity, const UNIQ: bool> Default for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: Default, C: Atomicity, const UNIQ: bool> Default for Genrc<'a, T, C, Global, UNIQ> {
     fn default() -> Self {
         Genrc::new(T::default())
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Deref for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> Deref
+    for Genrc<'a, T, C, A, UNIQ>
+{
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -545,7 +611,7 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Deref for Genrc<'a, T, C, UN
 
 /// If we still have a unique reference, we can safely mutate the
 /// contents.
-impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Genrc<'a, T, C, true> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, A: Allocator> DerefMut for Genrc<'a, T, C, A, true> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: ptr is always a valid reference, there's just no
         // way to spell the lifetime in Rust. Since we're a unique
@@ -554,17 +620,20 @@ impl<'a, T: 'a + ?Sized, C: Atomicity> DerefMut for Genrc<'a, T, C, true> {
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> Drop
+    for Genrc<'a, T, C, A, UNIQ>
+{
     fn drop(&mut self) {
         let h = self.header();
         if !UNIQ && h.strong.dec() != 1 {
+            // other strong refs exist
             return;
         }
-        // last strong pointer was just dropped
+        // last strong pointer was just dropped; drop the value
         h.strong.acquire_fence();
         unsafe {
-            let f = h.drop_value;
-            f(self.header.as_ptr());
+            let f = h.drop_fn;
+            f(self.header.as_ptr(), true);
         }
 
         // decrement weak count owned by strong ptrs
@@ -581,13 +650,13 @@ impl<'a, T: ?Sized, C: Atomicity, const UNIQ: bool> Drop for Genrc<'a, T, C, UNI
         unsafe {
             // last weak pointer was just dropped
             let h = self.header.as_mut();
-            let f = h.drop_header;
-            f(self.header.as_ptr());
+            let f = h.drop_fn;
+            f(self.header.as_ptr(), false);
         }
     }
 }
 
-impl<'a, T: ?Sized, C: Atomicity> Drop for Weak<'a, T, C> {
+impl<'a, T: ?Sized, C: Atomicity, A: Allocator> Drop for Weak<'a, T, C, A> {
     fn drop(&mut self) {
         let h = self.header();
         if h.weak.dec() != 1 {
@@ -597,79 +666,88 @@ impl<'a, T: ?Sized, C: Atomicity> Drop for Weak<'a, T, C> {
         // completed in Arc::drop.
         h.weak.acquire_fence();
         unsafe {
-            let f = h.drop_header;
-            f(self.header.as_ptr());
+            let f = h.drop_fn;
+            f(self.header.as_ptr(), false);
         }
     }
 }
 
 /// A unique pointer can be lowered to a shared pointer.
-impl<'a, T: 'a, C: Atomicity> From<Genrc<'a, T, C, true>> for Genrc<'a, T, C, false> {
-    fn from(uniq: Genrc<'a, T, C, true>) -> Self {
-        Genrc::<'a, T, C, true>::shared(uniq)
+impl<'a, T: 'a, C: Atomicity, A: Allocator> From<Genrc<'a, T, C, A, true>>
+    for Genrc<'a, T, C, A, false>
+{
+    fn from(uniq: Genrc<'a, T, C, A, true>) -> Self {
+        Genrc::<'a, T, C, A, true>::shared(uniq)
     }
 }
 
-impl<'a, T: ?Sized + PartialEq, C: Atomicity, const Q1: bool, const Q2: bool>
-    PartialEq<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
+impl<'a, T: ?Sized + PartialEq, C: Atomicity, A: Allocator, const Q1: bool, const Q2: bool>
+    PartialEq<Genrc<'a, T, C, A, Q2>> for Genrc<'a, T, C, A, Q1>
 {
     #[inline]
-    fn eq(&self, other: &Genrc<T, C, Q2>) -> bool {
+    fn eq(&self, other: &Genrc<T, C, A, Q2>) -> bool {
         // TODO: MarkerEq shenanigans for optimized
         // comparisons in the face of float idiocy.
         *(*self) == *(*other)
     }
 }
 
-impl<'a, T: ?Sized + PartialOrd, C: Atomicity, const Q1: bool, const Q2: bool>
-    PartialOrd<Genrc<'a, T, C, Q2>> for Genrc<'a, T, C, Q1>
+impl<'a, T: ?Sized + PartialOrd, C: Atomicity, A: Allocator, const Q1: bool, const Q2: bool>
+    PartialOrd<Genrc<'a, T, C, A, Q2>> for Genrc<'a, T, C, A, Q1>
 {
-    fn partial_cmp(&self, other: &Genrc<T, C, Q2>) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Genrc<T, C, A, Q2>) -> Option<cmp::Ordering> {
         (**self).partial_cmp(&**other)
     }
 
-    fn lt(&self, other: &Genrc<T, C, Q2>) -> bool {
+    fn lt(&self, other: &Genrc<T, C, A, Q2>) -> bool {
         *(*self) < *(*other)
     }
 
-    fn le(&self, other: &Genrc<T, C, Q2>) -> bool {
+    fn le(&self, other: &Genrc<T, C, A, Q2>) -> bool {
         *(*self) <= *(*other)
     }
 
-    fn gt(&self, other: &Genrc<T, C, Q2>) -> bool {
+    fn gt(&self, other: &Genrc<T, C, A, Q2>) -> bool {
         *(*self) > *(*other)
     }
 
-    fn ge(&self, other: &Genrc<T, C, Q2>) -> bool {
+    fn ge(&self, other: &Genrc<T, C, A, Q2>) -> bool {
         *(*self) >= *(*other)
     }
 }
 
-impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, const UNIQ: bool> cmp::Ord for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized + Ord, C: Atomicity, A: Allocator, const UNIQ: bool> cmp::Ord
+    for Genrc<'a, T, C, A, UNIQ>
+{
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         (**self).cmp(&**other)
     }
 }
 
-impl<'a, T: 'a + ?Sized + Eq, C: Atomicity, const UNIQ: bool> Eq for Genrc<'a, T, C, UNIQ> {}
+impl<'a, T: 'a + ?Sized + Eq, C: Atomicity, A: Allocator, const UNIQ: bool> Eq
+    for Genrc<'a, T, C, A, UNIQ>
+{
+}
 
-impl<'a, T: 'a + ?Sized + fmt::Display, C: Atomicity, const UNIQ: bool> fmt::Display
-    for Genrc<'a, T, C, UNIQ>
+impl<'a, T: 'a + ?Sized + fmt::Display, C: Atomicity, A: Allocator, const UNIQ: bool> fmt::Display
+    for Genrc<'a, T, C, A, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }
 }
 
-impl<'a, T: 'a + ?Sized + fmt::Debug, C: Atomicity, const UNIQ: bool> fmt::Debug
-    for Genrc<'a, T, C, UNIQ>
+impl<'a, T: 'a + ?Sized + fmt::Debug, C: Atomicity, A: Allocator, const UNIQ: bool> fmt::Debug
+    for Genrc<'a, T, C, A, UNIQ>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<'a, T: 'a + ?Sized, C: Atomicity, const UNIQ: bool> fmt::Pointer for Genrc<'a, T, C, UNIQ> {
+impl<'a, T: 'a + ?Sized, C: Atomicity, A: Allocator, const UNIQ: bool> fmt::Pointer
+    for Genrc<'a, T, C, A, UNIQ>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
@@ -681,19 +759,30 @@ impl<'a, T: ?Sized + fmt::Debug, C: Atomicity> fmt::Debug for Weak<'a, T, C> {
     }
 }
 
+// Call either `drop_value` or `drop_header` on a pointer. We use this bool
+// dispatcher function so we can have a single function pointer in `header`
+// instead of two.
+unsafe fn drop_fn<T, C, A: Allocator>(ptr: *mut Header<C>, dropping_value: bool) {
+    if dropping_value {
+        drop_value::<T, C, A>(ptr);
+    } else {
+        drop_header::<T, C, A>(ptr);
+    }
+}
+
 unsafe fn drop_header<T, C, A: Allocator>(ptr: *mut Header<C>) {
-    let ptr = ptr as *mut Alloc<T, C, A>;
+    let ptr = ptr as *mut Allocation<T, C, A>;
     #[cfg(not(feature = "allocator_api"))]
     let _ = Box::from_raw(ptr);
     #[cfg(feature = "allocator_api")]
     {
         let alloc = (&mut *ptr).alloc.assume_init_read();
-        let _ = Box::from_raw_in(ptr as *mut Alloc<T, C, A>, alloc);
+        let _ = Box::from_raw_in(ptr as *mut Allocation<T, C, A>, alloc);
     }
 }
 
 unsafe fn drop_value<T, C, A>(ptr: *mut Header<C>) {
-    let bptr = ptr as *mut Alloc<T, C, A>;
+    let bptr = ptr as *mut Allocation<T, C, A>;
     let bref = &mut *bptr;
     bref.value.assume_init_drop();
 }
